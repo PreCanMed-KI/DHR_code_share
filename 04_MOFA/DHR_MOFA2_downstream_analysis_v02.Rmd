@@ -1,0 +1,259 @@
+---
+title: "DHR MOFA2 v02 downstream analysis"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 9
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+Require all the libraries first
+```{r message=F}
+require(MultiAssayExperiment)
+require(SummarizedExperiment)
+require(MOFA2)
+require(RColorBrewer)
+require(tidyverse)
+```
+
+# Load the data
+
+```{r}
+load("/home/francesco.marabita/Projects/DHR/data/MultiAssayExp/out/DHR_MAexp_v05.RData")
+mofa.annot <- read.table(file="~/Projects/DHR/out/MOFA2_v02/DHR_MOFA2_v02_annotation.txt", sep="\t", header = T, stringsAsFactors = F, comment.char ="", quote = "")
+
+outDir <-  "/home/francesco.marabita/Projects/DHR/out/MOFA2_v02"
+```
+
+Based on preliminary exploration, he models without scaling have a better ELBO value. I will load the trained models with with `iter=10000`, `convergence_mode = "medium",` and `dropR2=0.02`.
+
+```{r}
+files <- list.files(outDir, pattern = "^.*_train_[0-9]+\\.hdf5$", full.names = T)
+mofa.train.l <- list()
+for(i in 1:length(files)){
+  mofa.train.l[[i]] <- load_model(files[i])
+  print(sapply(strsplit(files[i], split = "/", fixed = T), "[", 8))
+  names(mofa.train.l)[i] <- sapply(strsplit(files[i], split = "/", fixed = T), "[", 8)
+}
+
+
+elbo.df <- compare_elbo(mofa.train.l, log = F,return_data = T)
+elbo.df$num.factors <- sapply(mofa.train.l, function(x) get_dimensions(x)["K"])
+
+DT::datatable(elbo.df)
+
+elbo.df[which.min(elbo.df$ELBO),]
+
+compare_factors(mofa.train.l, show_colnames=F)
+
+mofa.sel <- select_model(mofa.train.l)
+plot_factor_cor(mofa.sel)
+```
+
+
+Add the metadata to the model
+
+```{r}
+sample_metadata <- mofa.sel@samples_metadata
+
+MAexp[["clinical"]] %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("ID") %>% 
+  right_join(as.data.frame(pData)) -> tmp
+
+sample_metadata <- merge(sample_metadata, tmp, by.x="sample", by.y="ID", all.x=T, sort=F)
+sample_metadata$pheno_subtype <- fct_recode(sample_metadata$clust.mf.comb, Low = "F1", High = "F2", High="F3", High="F4", Low="M1", High="M2")
+
+
+if(all(sample_metadata$sample==mofa.sel@samples_metadata$sample)){
+  samples_metadata(mofa.sel) <- as.data.frame(sample_metadata)
+} else { message("Sample order does not match")}
+
+features_metadata <-  mofa.sel@features_metadata
+features_metadata <- merge(features_metadata, mofa.annot, by="feature", all.x=T, sort=F)
+if(all(features_metadata$feature==mofa.sel@features_metadata$feature)){
+  features_metadata(mofa.sel) <- as.data.frame(features_metadata)
+} else { message("Sample order does not match")}
+
+```
+
+
+# Analysis
+
+## Variance explained
+
+Check the variance epxlained.
+
+```{r}
+#r2 <- mofa.sel@cache$variance_explained
+r2 <- get_variance_explained(mofa.sel)
+# r2
+df.expl.var <- as.data.frame(r2$r2_per_factor)
+df.expl.var$factor <- rownames(df.expl.var)
+DT::datatable(df.expl.var)
+
+p <- plot_variance_explained(mofa.sel, cluster = F, plot_total = T)
+p[[1]]
+p[[2]]
+
+```
+
+## Inspect the factors
+
+```{r}
+p <- plot_factor(mofa.sel, factors = 1:mofa.sel@dimensions$K,  color_by = "IID")
+p$layers[[1]]$aes_params$alpha <- 0.7
+p + scale_fill_viridis_d() + theme(legend.position = "none")
+
+p <- plot_factor(mofa.sel, factors = 1:mofa.sel@dimensions$K,  color_by = "Age")
+p$layers[[1]]$aes_params$alpha <- 0.7
+p + scale_fill_viridis_c()
+
+p <- plot_factor(mofa.sel, factors = 1:mofa.sel@dimensions$K,  color_by = "Sex")
+p$layers[[1]]$aes_params$alpha <- 0.7
+p + scale_fill_manual("Sex", values=c("F"="#d7191c", "M"="#2c7bb6"))
+
+p <- plot_factor(mofa.sel, factors = 1:mofa.sel@dimensions$K,  color_by = "BMI")
+p$layers[[1]]$aes_params$alpha <- 0.7
+p + scale_fill_viridis_c()
+
+p <- plot_factor(mofa.sel, factors = 1:mofa.sel@dimensions$K,  color_by = "pheno_subtype")
+p$layers[[1]]$aes_params$alpha <- 0.7
+p + scale_fill_manual("Subtype", values=c("High"="#d7191c", "Low"="#2c7bb6"))
+```
+
+
+## Inspect the weights
+
+Visualize the top weights
+
+```{r}
+for(i in 1:mofa.sel@dimensions$K){
+  for(j in 1:length(views_names(mofa.sel))){
+    p <- plot_top_weights(mofa.sel, factor = i, nfeatures = 30, view = views_names(mofa.sel)[j])
+    p <- p + scale_x_discrete(labels = rev(mofa.annot$feature.name[match(p$data$feature, mofa.annot$feature)])) +
+    ggtitle(views_names(mofa.sel)[j]) +
+    theme(axis.text.y=element_text(size = rel(0.9)))
+    print(p)
+  }
+}
+```
+
+```{r}
+for(i in 1:mofa.sel@dimensions$K){
+  for(j in 1:length(views_names(mofa.sel))){
+    p <- plot_weights(mofa.sel, factor = i, nfeatures = 10, view = views_names(mofa.sel)[j], scale = T, abs=F) + 
+      ggtitle(paste0(views_names(mofa.sel)[j], " - Factor ",i))
+
+  p$layers[[2]]$data$feature <- mofa.annot$feature.name[match(p$layers[[2]]$data$feature, mofa.annot$feature)]
+  print(p)
+  }
+}
+
+```
+
+Table of the weight for the top 50 features.
+
+```{r}
+get_weights(mofa.sel, as.data.frame = T, scale=F, abs=F) %>%
+  mutate(fearure.ID=mofa.annot$feature.ID[match(feature, mofa.annot$feature)],
+         feature.name=mofa.annot$feature.name[match(feature, mofa.annot$feature)]) -> f.weights
+
+w.top50.l <- list()
+for(i in 1:mofa.sel@dimensions$K){
+  w.top50.l[[i]] <- arrange(f.weights[f.weights$factor==paste0("Factor",i),], desc(abs(value)))[1:50,]
+  names(w.top50.l)[i] <- paste0("Factor",i)
+}
+
+htmltools::tagList(
+  lapply(w.top50.l, function(x) DT::datatable(x, options =list(pageLength=10) ))
+)
+
+```
+
+
+## Sample ordination
+
+```{r}
+set.seed(12345)
+mofa.sel <- run_umap(mofa.sel, n_neighbors = 20)
+
+plot_dimred(mofa.sel, method = "UMAP",  color_by = "IID", color_name = "IID") +
+  scale_fill_viridis_d() +
+  theme(legend.position = "none")
+
+plot_dimred(mofa.sel, method = "UMAP",  color_by = "Age", color_name = "Age") +
+  scale_fill_viridis_c()
+
+plot_dimred(mofa.sel, method = "UMAP",  color_by = "Sex", color_name = "Sex") +
+  scale_fill_viridis_d()
+
+plot_dimred(mofa.sel, method = "UMAP",  color_by = "BMI", color_name = "BMI") +
+  scale_fill_viridis_c()
+
+plot_dimred(mofa.sel, method = "UMAP",  color_by = "pheno_subtype", color_name = "Subtype") +
+  scale_fill_manual("Subtype", values=c("High"="#d7191c", "Low"="#2c7bb6"))
+
+```
+
+
+## Inspect the single views and the loadings
+
+```{r}
+
+for(v in 1:length(views_names(mofa.sel))){
+  
+  plot_weights_heatmap(
+    mofa.sel, 
+    view = views_names(mofa.sel)[v],
+    factors = 1:mofa.sel@dimensions$K,
+    show_colnames = F,
+    main=views_names(mofa.sel)[v]
+  )
+  
+  
+  p <- plot_top_weights(mofa.sel, view =  views_names(mofa.sel)[v],
+                        factor = rownames(df.expl.var[order(df.expl.var[,v],decreasing = T),])[1],
+                        nfeatures = 50)
+  plot_data_heatmap(mofa.sel, view =  views_names(mofa.sel)[v],
+                    factor = rownames(df.expl.var[order(df.expl.var[,v],decreasing = T),])[1],
+                    features = 50, labels_row = mofa.annot$feature.name[match(p$data$feature, mofa.annot$feature)],
+                    main = rownames(df.expl.var[order(df.expl.var[,v],decreasing = T),])[1],
+                    scale=ifelse(v==1,"none","row"), color = colorRampPalette(rev(brewer.pal(n = 7, name ="RdBu")))(100))
+  
+  p <- plot_top_weights(mofa.sel, view =  views_names(mofa.sel)[v],
+                        factor = rownames(df.expl.var[order(df.expl.var[,v],decreasing = T),])[2],
+                        nfeatures = 50)
+  plot_data_heatmap(mofa.sel, view =  views_names(mofa.sel)[v],
+                    factor = rownames(df.expl.var[order(df.expl.var[,v],decreasing = T),])[2],
+                    features = 50, labels_row = mofa.annot$feature.name[match(p$data$feature, mofa.annot$feature)],
+                    main = rownames(df.expl.var[order(df.expl.var[,v],decreasing = T),])[2],
+                    scale=ifelse(v==1,"none","row"), color = colorRampPalette(rev(brewer.pal(n = 7, name ="RdBu")))(100))
+  
+  p <- plot_top_weights(mofa.sel, view =  views_names(mofa.sel)[v],
+                        factor = rownames(df.expl.var[order(df.expl.var[,v],decreasing = T),])[3],
+                        nfeatures = 50)
+  plot_data_heatmap(mofa.sel, view =  views_names(mofa.sel)[v],
+                    factor = rownames(df.expl.var[order(df.expl.var[,v],decreasing = T),])[3],
+                    features = 50, labels_row = mofa.annot$feature.name[match(p$data$feature, mofa.annot$feature)],
+                    main = rownames(df.expl.var[order(df.expl.var[,v],decreasing = T),])[3],
+                    scale=ifelse(v==1,"none","row"), color = colorRampPalette(rev(brewer.pal(n = 7, name ="RdBu")))(100))
+  
+}
+```
+
+```{r}
+# save(mofa.sel, file="~/Projects/DHR/out/MOFA2_v02/DHR_MOFA2_v02_sel_model.RData")
+# saveRDS(mofa.sel, file="~/Projects/DHR/out/MOFA2_v02/DHR_MOFA2_v02_sel_model.rds")
+# mofa.factors <- get_factors(mofa.sel)$DHR
+# save(mofa.factors, file="~/Projects/DHR/out/MOFA2_v02/DHR_MOFA2_v02_factors.RData")
+# save.image(file="~/Projects/DHR/out/MOFA2_v02/DHR_MOFA2_v02.RData")
+```
+
+
+

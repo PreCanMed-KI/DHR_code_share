@@ -1,0 +1,335 @@
+---
+title: "DHR clinical variables v01"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+```{r}
+library(readxl)
+require(missMDA)
+require(FactoMineR)
+require(factoextra)
+require(tidyverse)
+```
+
+
+## Read the data
+
+
+```{r}
+clin.data <- read_excel("/home/francesco.marabita/Projects/DHR/data/Clinical/All_visits_20180201.xlsx", 1, na = "NA")
+```
+
+Data must be fixed in the right format. Change the date to the correct format first (Ignore time zone. All times should be Finnish time). Change sex to factor.
+
+```{r}
+clin.data %>% mutate_at("dateofbirth", function(x) as.Date(x, format = "%Y-%m-%d")) %>%
+  mutate_at("Visit", function(x) as.Date(x, format = "%d.%m.%Y")) %>%
+  mutate(VisitDateTime = paste0(Visit, " ", Visittime)) %>%
+  mutate_at("VisitDateTime", function(x) as.POSIXct(x, format = "%Y-%m-%d %H:%M", tz="Europe/Helsinki")) %>%
+  mutate_at("Sex", as.factor) %>%
+  mutate_at("Sex", function(x) recode_factor(x,"1"="M", "2"="F")) -> clin.data
+
+```
+
+Visit 3 and visit 5 are provided in a separate file.
+
+```{r}
+vis3 <- read_excel("/home/francesco.marabita/Projects/DHR/data/Clinical/Visit3_insulin.xlsx", 1, na = "NA")
+vis5 <- read_excel("/home/francesco.marabita/Projects/DHR/data/Clinical/Visit5_insulin.xlsx", 1, na = "NA")
+vis3.5 <- rbind(vis3, vis5)
+
+tmp <- clin.data %>% 
+  filter( VISITnumber==3 |  VISITnumber==5) %>%
+  select(-SInsu) %>%
+  left_join(vis3.5, by=c("visit_id"="subject"))
+
+clin.data %<>%
+  filter( VISITnumber<3 |  VISITnumber==4) %>%
+  bind_rows(tmp)
+
+rm(tmp)
+```
+
+## Factor Analysis of Mixed Data (FAMD)
+
+I try Factor Analysis of Mixed data to visualize the data. I remove the ID variables and select only the quantitative and the qualitative variables. Select only mean values for blood pressure.
+
+```{r}
+
+
+to.FAMD <- clin.data %>% select(-ID,-visit_id, -VISITnumber, -Visittime) %>%
+  select_if(function(x) is.character(x)|is.numeric(x)|is.factor(x)) %>%
+  select(-matches("_[1-3]$")) %>%
+  mutate_if(is.character, as.factor) %>% as.data.frame(.)
+rownames(to.FAMD) <- paste0(clin.data$ID,"_", clin.data$VISITnumber)
+
+#ncp <- estim_ncpFAMD(to.FAMD, pNA = 0.01, ncp.max = 5)
+
+to.FAMD.imp <- imputeFAMD(to.FAMD, ncp = 5)
+
+res.FAMD <- FAMD(to.FAMD, ncp = 15, tab.disj = to.FAMD.imp$tab.disj, graph = F)
+```
+
+```{r results="asis"}
+DT::datatable(as.data.frame(res.FAMD$eig),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+DT::datatable(as.data.frame(res.FAMD$var$coord),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+DT::datatable(as.data.frame(res.FAMD$var$contrib),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+DT::datatable(as.data.frame(res.FAMD$var$cos2),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+
+```
+### Visualize the results
+
+Percentage ov variance explained and variable contribution
+
+```{r}
+fviz_screeplot(res.FAMD, ncp=15)
+
+for(i in 1:15){
+  print(fviz_contrib(res.FAMD, choice = "var", axes=i))
+}
+
+```
+
+Relation between variables
+
+```{r}
+fviz_famd_var(res.FAMD, "quanti.var", col.var = "contrib", 
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = F)
+
+plot(res.FAMD,choix = "quanti")
+
+fviz_famd_var(res.FAMD, "quali.var", col.var = "contrib", 
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07")
+             )
+plot(res.FAMD,choix = "quali")
+```
+
+Plot the individuals
+```{r }
+fviz_famd_ind(res.FAMD)
+plot(res.FAMD, choix = "ind",lab.var = T)
+
+for(i in 1:15){
+  print(fviz_contrib(res.FAMD, choice = "ind", axes=i))
+}
+```
+
+I will color the individuals based on all the variables.
+
+```{r}
+require(plotly)
+
+toPlot <- cbind(to.FAMD.imp$completeObs, res.FAMD$ind$coord)
+toPlot$label <- rownames(toPlot)
+
+p <- ggplot(toPlot, aes(x=Dim.1, y=Dim.2))+
+  geom_point(aes(text=label,col=Sex))
+ggplotly(p)
+
+```
+
+
+```{r fig.height=21, fig.width=7}
+require(gridExtra)
+
+p.l = list()
+p <- ggplot(toPlot, aes(x=Dim.1, y=Dim.2))
+for(i in 1:(ncol(toPlot)-16)) {
+  p.l[[i]] = p+geom_point(aes_string(col=colnames(toPlot)[i]))+
+    theme(legend.position="bottom")
+}
+do.call(grid.arrange,c(p.l,ncol=4, nrow=10))
+
+```
+
+Same but with Dim2 - Dim3
+
+```{r}
+
+p <- ggplot(toPlot, aes(x=Dim.3, y=Dim.4))+
+  geom_point(aes(text=label,col=Sex))
+ggplotly(p)
+```
+
+```{r fig.height=21, fig.width=7}
+
+p.l = list()
+p <- ggplot(toPlot, aes(x=Dim.3, y=Dim.4))
+for(i in 1:(ncol(toPlot)-16)) {
+  p.l[[i]] = p+geom_point(aes_string(col=colnames(toPlot)[i]))+
+    theme(legend.position="bottom")
+}
+do.call(grid.arrange,c(p.l,ncol=4, nrow=10))
+
+```
+
+I repeat the same analysis, but this time I do not use the last visit for factor analysis. The samples from visit 5 will be only projected into the new space
+```{r}
+
+ind.sup <- which(clin.data$VISITnumber==5)
+res.FAMD.bas <- FAMD(to.FAMD.imp$completeObs, ncp = 15,
+                     ind.sup = ind.sup)
+summary(res.FAMD.bas)
+
+```
+
+## PCA
+
+Impute missing data first and then perform PCA (with base or FactoMineR packages)
+
+```{r}
+to.PCA <- clin.data %>% select(-ID,-visit_id, -VISITnumber, -Visittime) %>%
+  select_if(is.numeric) %>%
+  select(-matches("_[1-3]$")) %>%
+  as.data.frame()
+
+rownames(to.PCA) <- paste0(clin.data$ID,"_", clin.data$VISITnumber)
+
+estim_ncpPCA(to.PCA, ncp.max = 10, method.cv = "Kfold", scale=T)
+
+to.PCA.imp <- imputePCA(to.PCA, ncp = 5, scale = T)
+```
+
+With base package
+
+```{r}
+res.PCA.base <- prcomp(to.PCA.imp$completeObs,scale. = T, center = T)
+
+biplot(res.PCA.base, cex = c(0.5,1))
+```
+
+With FactoMineR
+
+```{r}
+res.PCA<- PCA(to.PCA.imp$completeObs, scale.unit = T, graph = F, ncp = 15)
+```
+
+```{r results="asis"}
+DT::datatable(as.data.frame(res.PCA$eig),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+DT::datatable(as.data.frame(res.PCA$var$coord),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+DT::datatable(as.data.frame(res.PCA$var$contrib),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+DT::datatable(as.data.frame(res.PCA$var$cos2),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+
+```
+
+### Visualize the results
+
+```{r}
+fviz_screeplot(res.PCA,  ncp = 15)
+
+for(i in 1:15){
+  print(fviz_contrib(res.PCA, choice = "var", axes=i))
+}
+
+```
+```{r}
+fviz_pca_biplot(res.PCA, col.var = "contrib", 
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = F,label = "var")
+```
+
+Relation between variables
+
+```{r}
+fviz_pca_var(res.PCA, col.var = "contrib", 
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = F)
+
+```
+
+Plot the individuals
+
+```{r }
+fviz_pca_ind(res.PCA)
+
+for(i in 1:15){
+  print(fviz_contrib(res.PCA, choice = "ind", axes=i))
+}
+```
+
+```{r}
+require(plotly)
+
+toPlot <- data.frame(to.PCA.imp$completeObs, Sex=clin.data$Sex, res.PCA$ind$coord)
+toPlot$label <- rownames(toPlot)
+toPlot$Sex <- relevel(toPlot$Sex,ref = "F")
+
+p <- ggplot(toPlot, aes(x=Dim.1, y=Dim.2))+
+  geom_point(aes(text=label,col=Sex))
+ggplotly(p)
+
+```
+
+```{r}
+p <- ggplot(toPlot, aes(x=Dim.1, y=Dim.3))+
+  geom_point(aes(text=label,col=Sex))
+ggplotly(p)
+
+```
+
+```{r}
+p <- ggplot(toPlot, aes(x=Dim.3, y=Dim.4))+
+  geom_point(aes(text=label,col=Sex))
+ggplotly(p)
+
+```
+
+```{r fig.height=21, fig.width=7}
+
+p.l = list()
+p <- ggplot(toPlot, aes(x=Dim.1, y=Dim.2))
+for(i in 1:(ncol(toPlot)-16)) {
+  p.l[[i]] = p+geom_point(aes_string(col=colnames(toPlot)[i]))+
+    theme(legend.position="bottom")
+}
+do.call(grid.arrange,c(p.l,ncol=4, nrow=10))
+
+```
+
+```{r fig.height=21, fig.width=7}
+
+p.l = list()
+p <- ggplot(toPlot, aes(x=Dim.1, y=Dim.3))
+for(i in 1:(ncol(toPlot)-16)) {
+  p.l[[i]] = p+geom_point(aes_string(col=colnames(toPlot)[i]))+
+    theme(legend.position="bottom")
+}
+do.call(grid.arrange,c(p.l,ncol=4, nrow=10))
+
+```
+
+```{r fig.height=21, fig.width=7}
+
+p.l = list()
+p <- ggplot(toPlot, aes(x=Dim.3, y=Dim.4))
+for(i in 1:(ncol(toPlot)-16)) {
+  p.l[[i]] = p+geom_point(aes_string(col=colnames(toPlot)[i]))+
+    theme(legend.position="bottom")
+}
+do.call(grid.arrange,c(p.l,ncol=4, nrow=10))
+
+```
+

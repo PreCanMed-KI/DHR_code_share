@@ -1,0 +1,490 @@
+---
+title: "DHR MultiAssayExperiment v05"
+output:
+  html_document:
+    fig_width: 9
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+# MultiAssayExperiment construction
+
+Require all the libraries
+```{r}
+require(MultiAssayExperiment)
+require(SummarizedExperiment)
+require(plotly)
+require(RColorBrewer)
+require(factoextra)
+require(UpSetR)
+require(tidyverse)
+```
+
+## Required elements
+
+The MultiAssayExperiment class requires:
+
+1. `colData`: primary data (i.e. info on biological units: subjects)
+2. `ExperimentList`: experimental data
+3. `sampleMap`: relating `colData` to multiple assays
+
+Source for experimental data are the multuple omics and the quantitative clinical variables. The source for the `colData` object will be the RData file with the clinical data.
+
+### `colData`: primary data
+
+```{r}
+load("/home/francesco.marabita/Projects/DHR/data/Clinical/Clin_data_2018-02-13.RData")
+clus.df <- read.table("/home/francesco.marabita/Projects/DHR/data/Clinical/DHR_clinData_clusters.txt", header=T)
+colnames(clus.df)[1] <- "IID"
+
+
+pData <- clin.data[, c("ID", "visit_id", "VISITnumber", "dateofbirth", "Age", "Visit", "Visittime", "Sex")]
+colnames(pData) <- c("IID", "ID", "Visit.number", "Birth.date", "Age", "Visit.date", "Visit.time", "Sex")
+pData$Sample.name <- paste0(pData$IID, "_", pData$Visit.number)
+pData <- arrange(pData, IID, Visit.number)
+pData <- merge(pData, clus.df, by="IID")
+
+pData <- DataFrame(pData)
+rownames(pData) <- pData$ID
+
+head(pData, 10)
+
+pData.IID <- pData[, c("IID", "Birth.date", "Sex", "clust.all", "clust.mf.comb", "clust.mf2")]
+pData.IID <- pData.IID[!duplicated(pData.IID),]
+rownames(pData.IID) <- pData.IID$IID
+
+head(pData.IID, 10)
+```
+
+### `ExperimentList`: experimental data
+Only the numerical variable in the clinical data object will be considered.
+```{r}
+load("/home/francesco.marabita/Projects/DHR/data/Autoantibodies/out/DHR_autoab_se_v02.RData")
+load("/home/francesco.marabita/Projects/DHR/data/Metabolomics/out/DHR_GCMS_se_v02.RData")
+load("/home/francesco.marabita/Projects/DHR/data/Metabolomics/out/LCMS/DHR_LCMS_se_v03.RData")
+load("/home/francesco.marabita/Projects/DHR/data/Proteomics/out/DHR_prot_se.RData")
+load("/home/francesco.marabita/Projects/DHR/data/Microbiome/out/DHR_microbiome_16S_MAExp_v01.RData")
+
+
+clin.data %>% select(-(1:8)) %>%
+  select_if(is.numeric) %>%
+  select(-matches("_[1-3]$")) %>%
+  t() -> clin.m
+colnames(clin.m) <- clin.data$visit_id
+
+objlist <- list("clinical" = clin.m,
+                "GCMS" = GCMS.se,
+                "LCMS.neg" = LCMS.neg.se,
+                "LCMS.pos" = LCMS.pos.se,
+                "autoab" = autoab.se,
+                "prot.1" = prot.se.1,
+                "prot.2" = prot.se.2,
+                "prot.3" = prot.se.3,
+                "prot.4" = prot.se.4,
+                "prot.5" = prot.se.5,
+                "prot.6" = prot.se.6,
+                "microb.16S" = microbiome.MAExp[["physeq.genera.vst"]])
+
+```
+
+### `sampleMap`: relating `colData` to multiple assays
+```{r}
+listmap <- list(clinical = data.frame(primary = clin.data$ID,
+                                      colname = colnames(clin.m),
+                                      stringsAsFactors = FALSE),
+                GCMS = data.frame(primary = GCMS.se$IID,
+                                  colname = colnames(GCMS.se),
+                                  stringsAsFactors = FALSE),
+                LCMS.neg = data.frame(primary = LCMS.neg.se$IID,
+                                      colname = colnames(LCMS.neg.se),
+                                      stringsAsFactors = FALSE),
+                LCMS.pos = data.frame(primary = LCMS.pos.se$IID,
+                                      colname = colnames(LCMS.pos.se),
+                                      stringsAsFactors = FALSE),
+                autoab = data.frame(primary = autoab.se$IID,
+                                    colname = colnames(autoab.se),
+                                    stringsAsFactors = FALSE),
+                prot.1 = data.frame(primary = prot.se.1$IID,
+                                    colname = colnames(prot.se.1),
+                                    stringsAsFactors = FALSE),
+                prot.2 = data.frame(primary = prot.se.2$IID,
+                                    colname = colnames(prot.se.2),
+                                    stringsAsFactors = FALSE),
+                prot.3 = data.frame(primary = prot.se.3$IID,
+                                    colname = colnames(prot.se.3),
+                                    stringsAsFactors = FALSE),
+                prot.4 = data.frame(primary = prot.se.4$IID,
+                                    colname = colnames(prot.se.4),
+                                    stringsAsFactors = FALSE),
+                prot.5 = data.frame(primary = prot.se.5$IID,
+                                    colname = colnames(prot.se.5),
+                                    stringsAsFactors = FALSE),
+                prot.6 = data.frame(primary = prot.se.6$IID,
+                                    colname = colnames(prot.se.6),
+                                    stringsAsFactors = FALSE),
+                microb.16S = data.frame(primary = microbiome.MAExp[["physeq.genera.vst"]]$IID,
+                                    colname = colnames(microbiome.MAExp[["physeq.genera.vst"]]),
+                                    stringsAsFactors = FALSE))
+
+dfmap <- listToMap(listmap)
+```
+
+Before creating the `MultiAssayExperiment` object I check that there are no problems.
+
+```{r}
+prep <- prepMultiAssay(ExperimentList = objlist, colData = pData.IID, sampleMap = dfmap)
+
+MAexp <- MultiAssayExperiment(experiments = objlist, colData = pData.IID, sampleMap = dfmap)
+```
+
+Select only one assay per experiment containing the normalization method of choiche.
+
+```{r}
+
+MAexp.clean <- MAexp
+assays(MAexp.clean[["GCMS"]]) <- list("ruv4RC" = assays(MAexp[["GCMS"]])$ruv4RC)
+assays(MAexp.clean[["LCMS.neg"]]) <- list("ruv4RC" = assays(MAexp[["LCMS.neg"]])$ruv4RC)
+assays(MAexp.clean[["LCMS.pos"]]) <- list("ruv4RC" = assays(MAexp[["LCMS.pos"]])$ruv4RC)
+assays(MAexp.clean[["autoab"]]) <- list("log2PQN" = assays(MAexp[["autoab"]])$log2PQN)
+assays(MAexp.clean[["prot.1"]]) <- list("NPX_LOD" = assays(MAexp[["prot.1"]])$NPX_LOD)
+assays(MAexp.clean[["prot.2"]]) <- list("NPX_LOD" = assays(MAexp[["prot.2"]])$NPX_LOD)
+assays(MAexp.clean[["prot.3"]]) <- list("NPX_LOD" = assays(MAexp[["prot.3"]])$NPX_LOD)
+assays(MAexp.clean[["prot.4"]]) <- list("NPX_LOD" = assays(MAexp[["prot.4"]])$NPX_LOD)
+assays(MAexp.clean[["prot.5"]]) <- list("NPX_LOD" = assays(MAexp[["prot.5"]])$NPX_LOD)
+assays(MAexp.clean[["prot.6"]]) <- list("NPX_LOD" = assays(MAexp[["prot.6"]])$NPX_LOD)
+assays(MAexp.clean[["microb.16S"]]) <- list("vst_otu" = assays(MAexp[["microb.16S"]])$otu_table)
+
+
+```
+
+Remove unwanted features.
+
+```{r}
+# remove internal standards from GCMS and LCMS
+MAexp.clean[["GCMS"]] <- MAexp.clean[["GCMS"]][!grepl("_IS_", rownames(MAexp.clean[["GCMS"]]), fixed=T),]
+MAexp.clean[["LCMS.neg"]] <- MAexp.clean[["LCMS.neg"]][!grepl("_IS_", rownames(MAexp.clean[["LCMS.neg"]]), fixed=T),]
+MAexp.clean[["LCMS.pos"]] <- MAexp.clean[["LCMS.pos"]][!grepl("_IS_", rownames(MAexp.clean[["LCMS.pos"]]), fixed=T),]
+
+# Remove proteomic features that are <LOD in > 1/4 of the observations
+for(i in c(1:6)){
+  tmp <- assays(MAexp[[paste0("prot.",i)]])$NPX_NaN
+  feat.out <- rownames(tmp)[apply(tmp, 1, function(x) sum(is.na(x)) > (0.25*length(x))) ]
+  MAexp.clean[[paste0("prot.",i)]] <- MAexp.clean[[paste0("prot.",i)]][!rownames(MAexp.clean[[paste0("prot.",i)]]) %in% feat.out,]
+  rm(tmp, feat.out)
+}
+
+# FS, CCL22, BDNF, NFASC are faulty assays (Olink communication: remove them)
+# remove  "142_FS" (CVDII), "149_CCL22" (CVDIII) "103_BDNF" (inflammation)
+MAexp.clean[["prot.2"]] <- MAexp.clean[["prot.2"]][!rownames(MAexp.clean[["prot.2"]]) %in% "X142_FS",]
+MAexp.clean[["prot.3"]] <- MAexp.clean[["prot.3"]][!rownames(MAexp.clean[["prot.3"]]) %in% "X149_CCL22",]
+MAexp.clean[["prot.4"]] <- MAexp.clean[["prot.4"]][!rownames(MAexp.clean[["prot.4"]]) %in% "X103_BDNF",]
+
+# Remove autoantibodies that are background for all the observation
+# scored data: 16 reactivity scores (0.0-0.5 is most probably background, 1.2-1.6 is most probably true reactivities, the in-between scores of 0.5-1.2 are uncertain)
+tmp <- assays(MAexp[["autoab"]])$Scoring
+feat.out <- rownames(tmp)[ rowSums(tmp <= 0.5) == ncol(tmp)]
+MAexp.clean[["autoab"]] <- MAexp.clean[["autoab"]][!rownames(MAexp.clean[["autoab"]]) %in% feat.out,]
+
+# Remove taxa with a prevalence < 30% of the observations
+tmp <- assays(microbiome.MAExp[["physeq.genera"]])$otu_table
+feat.out <- rownames(tmp)[rowSums(tmp>0)/ncol(tmp) <= 0.3]
+MAexp.clean[["microb.16S"]] <- MAexp.clean[["microb.16S"]][!rownames(MAexp.clean[["microb.16S"]]) %in% feat.out,]
+```
+
+Check how many samples have complete measurements.
+
+```{r}
+toUpset <-matrix(NA,nrow = length(experiments(MAexp.clean)), ncol = length(unique(pData$ID)),
+                 dimnames = list(names(experiments(MAexp.clean)), unique(pData$ID)))
+for (i in 1:nrow(toUpset)){
+toUpset[i,] <- as.numeric(colnames(toUpset) %in% colnames(MAexp.clean[[i]]))
+}
+
+upset(as.data.frame(t(toUpset)), nsets = length(experiments(MAexp.clean)), sets.bar.color = "#56B4E9", order.by = "freq")
+```
+## Annotation table
+
+* Proteomics data: consider the provided UniprotID. In case multiple ID are provided, only the first one will be considered.
+* Autoantibody data: consider the UniprotID
+* GCMS and LCMS data: consider HMDB.ID
+* 16S data: condider concatenation of the taxonomic categories
+
+In case multiple IDs are provided, only the first one will be considered
+
+```{r}
+# Uniprot for Proteomics [6:11]
+uniprot.annot1 <- data.frame(featureID=rownames(MAexp[["autoab"]]),
+                             feature.name=as.character(rowData(MAexp[["autoab"]])[,"Gene_HPRR_ID"]),
+                             Uniprot.ID=as.character(rowData(MAexp[["autoab"]])[,"Uniprot"]))
+uniprot.annot1 <- separate(uniprot.annot1, Uniprot.ID, into = "Uniprot.ID.1", extra = "drop")
+
+
+uniprot.annot.list2 <- list()
+for(i in 6:11){
+  uniprot.annot.list2[[i-5]] <- data.frame(featureID=rownames(MAexp[[i]]),
+                                          feature.name=as.character(rowData(MAexp[[i]])[,"feature.ID"]),
+                                          Uniprot.ID=as.character(rowData(MAexp[[i]])[,"Uniprot.ID"]))
+  uniprot.annot.list2[[i-5]] <- separate(uniprot.annot.list2[[i-5]],Uniprot.ID, into = "Uniprot.ID.1", extra = "drop")
+  names(uniprot.annot.list2)[i-5] <- names(experiments(MAexp))[i]
+}
+uniprot.annot2 <- do.call(rbind, uniprot.annot.list2)
+
+# HMDB for GCMS [2]
+hmdb.annot1 <- data.frame(featureID=rownames(MAexp[["GCMS"]]),
+                          feature.name=as.character(rowData(MAexp[["GCMS"]])[,"Annotated.Metabolite.Id"]),
+                          HMDB.ID=as.character(rowData(MAexp[["GCMS"]])[,"HMDB.ID"]))
+hmdb.annot1 <- separate(hmdb.annot1,  HMDB.ID , into = "HMDB.ID.1", extra = "drop")
+
+# HMDB for LCMS [3:4]
+hmdb.annot.list2 <- list()
+for(i in 3:4){
+  hmdb.annot.list2[[i-2]] <- data.frame(featureID=rownames(MAexp[[i]]),
+                                        feature.name=as.character(rowData(MAexp[[i]])[,"Metabolite.name"]),
+                                        HMDB.ID=as.character(rowData(MAexp[[i]])[,"HMDB.ID.1"]))
+  hmdb.annot.list2[[i-2]] <- separate(hmdb.annot.list2[[i-2]],  HMDB.ID , into = "HMDB.ID.1", extra = "drop")
+  names(hmdb.annot.list2)[i-2] <- names(experiments(MAexp))[i]
+}
+hmdb.annot2 <- do.call(rbind, hmdb.annot.list2)
+
+# concatenated taxa for 16S [12]
+taxa.col <- c("Domain","Phylum","Class","Order","Family","Genus")
+taxa.tmp <- rowData(MAexp[["microb.16S"]])[,taxa.col]
+taxa.tmp[]<-lapply(taxa.tmp,as.character)
+taxa.annot <- data.frame(featureID=rownames(MAexp[["microb.16S"]]),
+                         feature.name=apply(taxa.tmp[,5:6], 1, paste, collapse= "_"),
+                         taxonomy=apply(taxa.tmp, 1, paste, collapse= "_"))
+
+annot.df <- rbind(uniprot.annot1, uniprot.annot2)
+annot.df <- merge(annot.df, rbind(hmdb.annot1, hmdb.annot2), by=c("featureID", "feature.name"), all=T)
+annot.df <- merge(annot.df,taxa.annot, by=c("featureID", "feature.name"), all=T)
+```
+
+
+## t-SNE
+
+I will select the intersection of samples with data in all the omics and run t-SNE
+
+```{r}
+require(cluster)
+require(Rtsne)
+
+tsne.l <- list()
+keep.col <- intersect(intersect(intersect(colnames(assay(MAexp.clean[["GCMS"]])), colnames(assay(MAexp.clean[["autoab"]]))), colnames(assay(MAexp.clean[["LCMS.pos"]]))), colnames(assay(MAexp.clean[["microb.16S"]])))
+for(k in  2:length(experiments(MAexp.clean))){
+  tmp <- assay(MAexp.clean[[k]])
+  tmp <- tmp[,keep.col]
+  tmp <- t(scale(t(tmp), center = T, scale=T))
+  tsne.l[[k-1]] <- tmp
+  names(tsne.l)[k-1] <- names(experiments(MAexp.clean))[k]
+}
+
+p.v <- pData$clust.mf.comb[match(colnames(tsne.l[[1]]),pData$ID)]
+
+
+for(p in c(5, 25, 50, 100)){
+  res.tsne <- Rtsne(daisy(t(do.call(rbind,tsne.l)), metric = "euclidean", stand = T),
+                  is_distance = T,
+                  pca_center = T, pca_scale = F,
+                  iter=5000, perplexity=p)
+
+plot.tsne <-  res.tsne$Y %>% 
+  as.data.frame() %>% 
+  setNames(c("Dim.1", "Dim.2")) %>% 
+  mutate(cluster=p.v, ID=colnames(tsne.l[[1]]))
+
+plot.tsne$IID <- pData$IID[match(plot.tsne$ID,pData$ID)]
+
+assign(paste0("p",p), ggplot(plot.tsne, aes(x=Dim.1, y=Dim.2))+
+         geom_point(aes(text=paste0(IID,"_", ID), fill=cluster), col="black", pch=21, size=3, alpha=0.7)+
+         scale_fill_brewer(palette = "RdYlBu"))
+}
+
+ggplotly(p5)
+ggplotly(p25)
+ggplotly(p50)
+ggplotly(p100)
+```
+
+Save the RData file
+
+```{r}
+#save(MAexp, MAexp.clean, pData, pData.IID, annot.df, file="/home/francesco.marabita/Projects/DHR/data/MultiAssayExp/out/DHR_MAexp_v05.RData")
+```
+
+# Between and within-individual variation
+
+## GCMS
+
+```{r}
+dist.m <-dist(t(assays(GCMS.se)$ruv4RC))
+dist.list <- vector("list", length(unique(colData(GCMS.se)$IID)))
+names(dist.list) <- unique(colData(GCMS.se)$IID)
+for (i in unique(colData(GCMS.se)$IID)) {
+  dist.list[[i]] <- list(intra.dist=numeric(), inter.dist=numeric())
+  idx <- labels(dist.m) %in% colData(GCMS.se)$ID[colData(GCMS.se)$IID %in% i]
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, idx]
+  dist.list[[i]]$intra.dist <- c(tmp.mat[lower.tri(tmp.mat, diag = F)])
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, !idx]
+  dist.list[[i]]$inter.dist <- c(tmp.mat)
+}   
+
+intra.med <- unlist(lapply(dist.list, function(x) median(x$intra.dist)))
+inter.med <- lapply(dist.list, function(x) x$inter.dist)
+
+intra.med <- sort(intra.med, decreasing = T)
+inter.med <- inter.med[names(intra.med)]
+boxplot(inter.med, ylim=c(0, max(unlist(inter.med))), cex=0.2, main="", las=2, cex.axis=0.5)
+points(intra.med, pch=19, col="red", cex=0.8)
+```
+
+## LCMS
+
+```{r}
+m1 <- as.data.frame(assays(LCMS.neg.se)$ruv4RC)
+m1$feature.ID <- rownames(LCMS.neg.se)
+m2 <- as.data.frame(assays(LCMS.pos.se)$ruv4RC)
+m2$feature.ID <- rownames(LCMS.pos.se)
+LCMS <- merge(m1, m2, all=T, sort=F)
+rownames(LCMS) <- LCMS$feature.ID
+LCMS <- LCMS[, !colnames(LCMS) %in% "feature.ID"]
+
+dist.m <-dist(t(LCMS))
+dist.list <- vector("list", length(unique(colData(LCMS.neg.se)$IID)))
+names(dist.list) <- unique(colData(LCMS.neg.se)$IID)
+for (i in unique(colData(LCMS.neg.se)$IID)) {
+  dist.list[[i]] <- list(intra.dist=numeric(), inter.dist=numeric())
+  idx <- labels(dist.m) %in% colData(LCMS.neg.se)$ID[colData(LCMS.neg.se)$IID %in% i]
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, idx]
+  dist.list[[i]]$intra.dist <- c(tmp.mat[lower.tri(tmp.mat, diag = F)])
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, !idx]
+  dist.list[[i]]$inter.dist <- c(tmp.mat)
+}   
+
+intra.med <- unlist(lapply(dist.list, function(x) median(x$intra.dist)))
+inter.med <- lapply(dist.list, function(x) x$inter.dist)
+
+intra.med <- sort(intra.med, decreasing = T)
+inter.med <- inter.med[names(intra.med)]
+boxplot(inter.med, ylim=c(0, max(unlist(inter.med))), cex=0.2, main="", las=2, cex.axis=0.5)
+points(intra.med, pch=19, col="red", cex=0.8)
+```
+
+## Autoantibodies
+
+```{r}
+dist.m <-dist(t(assays(autoab.se)$log2PQN))
+dist.list <- vector("list", length(unique(colData(autoab.se)$IID)))
+names(dist.list) <- unique(colData(autoab.se)$IID)
+for (i in unique(colData(autoab.se)$IID)) {
+  dist.list[[i]] <- list(intra.dist=numeric(), inter.dist=numeric())
+  idx <- labels(dist.m) %in% colData(autoab.se)$ID[colData(autoab.se)$IID %in% i]
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, idx]
+  dist.list[[i]]$intra.dist <- c(tmp.mat[lower.tri(tmp.mat, diag = F)])
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, !idx]
+  dist.list[[i]]$inter.dist <- c(tmp.mat)
+}   
+
+intra.med <- unlist(lapply(dist.list, function(x) median(x$intra.dist)))
+inter.med <- lapply(dist.list, function(x) x$inter.dist)
+
+intra.med <- sort(intra.med, decreasing = T)
+inter.med <- inter.med[names(intra.med)]
+boxplot(inter.med,   ylim=c(0, max(unlist(inter.med))), cex=0.2, main="", las=2, cex.axis=0.5)
+points(intra.med, pch=19, col="red", cex=0.8)
+```
+
+## Proteomics 
+
+```{r}
+p1 <- as.data.frame(assays(prot.se.1)$NPX_LOD)
+p1$feature.ID <- rownames(prot.se.1)
+p2 <- as.data.frame(assays(prot.se.2)$NPX_LOD)
+p2$feature.ID <- rownames(prot.se.2)
+p3 <- as.data.frame(assays(prot.se.3)$NPX_LOD)
+p3$feature.ID <- rownames(prot.se.3)
+p4 <- as.data.frame(assays(prot.se.4)$NPX_LOD)
+p4$feature.ID <- rownames(prot.se.4)
+p5 <- as.data.frame(assays(prot.se.5)$NPX_LOD)
+p5$feature.ID <- rownames(prot.se.5)
+p6 <- as.data.frame(assays(prot.se.6)$NPX_LOD)
+p6$feature.ID <- rownames(prot.se.6)
+
+prot <- merge(p1, p2, all=T, sort=F)
+prot <- merge(prot, p3, all=T, sort=F)
+prot <- merge(prot, p4, all=T, sort=F)
+prot <- merge(prot, p5, all=T, sort=F)
+prot <- merge(prot, p6, all=T, sort=F)
+
+#rownames(prot) <- prot$feature.ID
+prot <- prot[, !colnames(prot) %in% "feature.ID"]
+
+dist.m <-dist(t(prot))
+dist.list <- vector("list", length(unique(colData(prot.se.1)$IID)))
+names(dist.list) <- unique(colData(prot.se.1)$IID)
+for (i in unique(colData(prot.se.1)$IID)) {
+  dist.list[[i]] <- list(intra.dist=numeric(), inter.dist=numeric())
+  idx <- labels(dist.m) %in% colData(prot.se.1)$ID[colData(prot.se.1)$IID %in% i]
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, idx]
+  dist.list[[i]]$intra.dist <- c(tmp.mat[lower.tri(tmp.mat, diag = F)])
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, !idx]
+  dist.list[[i]]$inter.dist <- c(tmp.mat)
+}   
+
+intra.med <- unlist(lapply(dist.list, function(x) median(x$intra.dist)))
+inter.med <- lapply(dist.list, function(x) x$inter.dist)
+
+intra.med <- sort(intra.med, decreasing = T)
+inter.med <- inter.med[names(intra.med)]
+boxplot(inter.med,  ylim=c(0, max(unlist(inter.med))), cex=0.2, main="", las=2, cex.axis=0.5)
+points(intra.med, pch=19, col="red", cex=0.8)
+
+```
+
+## Microbiome
+
+```{r}
+# use Bray-Curtis dissimilarity on relative abundance table
+dist.m <- vegan::vegdist(t(assays(microbiome.MAExp[["physeq.f"]])$otu_table), method="bray")  
+dist.list <- vector("list", length(unique(colData(microbiome.MAExp[["physeq.f"]])$IID)))
+names(dist.list) <- unique(colData(microbiome.MAExp[["physeq.f"]])$IID)
+for (i in unique(colData(microbiome.MAExp[["physeq.f"]])$IID)) {
+  dist.list[[i]] <- list(intra.dist=numeric(), inter.dist=numeric())
+  idx <- labels(dist.m) %in% colData(microbiome.MAExp[["physeq.f"]])$ID[colData(microbiome.MAExp[["physeq.f"]])$IID %in% i]
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, idx]
+  dist.list[[i]]$intra.dist <- c(tmp.mat[lower.tri(tmp.mat, diag = F)])
+  
+  tmp.mat <- as.matrix(dist.m)
+  tmp.mat <- tmp.mat[idx, !idx]
+  dist.list[[i]]$inter.dist <- c(tmp.mat)
+}   
+
+intra.med <- unlist(lapply(dist.list, function(x) median(x$intra.dist)))
+inter.med <- lapply(dist.list, function(x) x$inter.dist)
+
+intra.med <- sort(intra.med, decreasing = T)
+inter.med <- inter.med[names(intra.med)]
+boxplot(inter.med, ylim=c(0, max(unlist(inter.med))), cex=0.2, main="", las=2, cex.axis=0.5)
+points(intra.med, pch=19, col="red", cex=0.8)
+```
+

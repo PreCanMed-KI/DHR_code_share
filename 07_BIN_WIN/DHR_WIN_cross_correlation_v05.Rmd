@@ -1,0 +1,496 @@
+---
+title: "DHR Within-Individuals cross-correlation network v05"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+```{r}
+require(openxlsx)
+require(igraph)
+require(MultiAssayExperiment)
+require(jsonlite)
+require(rmcorr)
+require(tidyverse)
+
+outDir <- "/home/francesco.marabita/Projects/DHR/out/correlation_network/v05"
+dir.create(outDir)
+
+```
+
+Include:
+
+* All the omics exlcuding aAb
+* Clinical data
+* Alpha diversity
+* Stress score
+* Fitness tests
+* Kardiocompassi
+* HFII
+* Sleep apnea score
+* Activities and sleep
+
+
+# Data
+
+## Load phenotype data
+
+```{r}
+load("~/Projects/DHR/out/pheno_preproc_v03/DHR_pheno_preproc_v03.RData")
+```
+
+## Omics and clinical data
+
+```{r}
+load("~/Projects/DHR/data/MultiAssayExp/out/DHR_MAexp_v05.RData")
+MAexp.long <- longFormat(MAexp.clean)
+colnames(MAexp.long) <- c("assay", "IID", "feature.ID", "ID", "value")
+MAexp.long$IID <- as.vector(MAexp.long$IID)
+MAexp.long$ID <- as.vector(MAexp.long$ID)
+MAexp.long$Visit.number <- pData$Visit.number[match(MAexp.long$ID, pData$ID)]
+MAexp.long <- MAexp.long[MAexp.long$assay!="autoab",]
+
+read.xlsx("~/Projects/DHR/data/Clinical/Variables_names_final.xlsx") %>% 
+  type_convert() -> var.cat
+```
+
+
+## Alpha diversity
+
+```{r}
+alpha.div <- read.table("/home/francesco.marabita/Projects/DHR/data/Microbiome/out/alpha_div.txt", header = T)
+alpha.rarif <- read.table("/home/francesco.marabita/Projects/DHR/data/Microbiome/out/alpha_div_rarified.txt", header = T)
+alpha.div %>% 
+  select(ID, alpha_div_0, alpha_div_1) %>% 
+  rename(Shannon.otu = alpha_div_0,
+         Shannon.genus = alpha_div_1) %>% 
+  mutate(Shannon.otu.rarif = alpha.rarif$alpha_div_0_rarif[match(ID, alpha.rarif$ID)],
+         Shannon.genus.rarif = alpha.rarif$alpha_div_1_rarif[match(ID, alpha.rarif$ID)]) %>% 
+  gather(key="feature.ID", value="value", -ID) %>% 
+  mutate(assay="microb.16S",
+         IID=pData$IID[match(ID,pData$ID)],
+         Visit.number=pData$Visit.number[match(ID,pData$ID)]) %>% 
+  select(assay, IID, feature.ID, ID, value, Visit.number) -> alpha.long
+```
+
+## Stress score
+
+```{r}
+s.score%>%
+  gather(key="feature.ID", value="value", -ID) %>% 
+  mutate(assay="stress.score",
+         IID=pData$IID[match(ID,pData$ID)],
+         Visit.number=pData$Visit.number[match(ID,pData$ID)]) %>% 
+  select(assay, IID, feature.ID, ID, value, Visit.number) -> s.score.long
+
+```
+
+## Fitness tests
+
+```{r}
+# some rows are duplicated !!!
+# remove 
+f1to5.l <- f1to5.l[!duplicated(f1to5.l),]
+
+f1to5.l%>% 
+  rename(feature.ID = component) %>% 
+  mutate(assay="fitness.tests",
+         IID=pData$IID[match(ID,pData$ID)],
+         Visit.number=pData$Visit.number[match(ID,pData$ID)]) %>% 
+  select(assay, IID, feature.ID, ID, value, Visit.number) -> f.tests.long
+
+```
+
+## Kardiokompassi
+
+```{r}
+kk.df <- read.table("/home/francesco.marabita/Projects/DHR/data/Other/KardioKompassi_results_20181030_132244.txt", header=T, sep="\t")
+kk.df%>% 
+  select(subject, trad_risk, grs_risk, genrisk_chd) %>% 
+  rename(ID = subject) %>%
+  gather(key="feature.ID", value="value", -ID) %>% 
+  mutate(assay="kk",
+         IID=pData$IID[match(ID,pData$ID)],
+         Visit.number=pData$Visit.number[match(ID,pData$ID)]) %>%
+  filter(!(Visit.number>1 & feature.ID=="genrisk_chd")) %>% 
+  select(assay, IID, feature.ID, ID, value, Visit.number) -> kk.long
+```
+
+## HFII
+
+```{r}
+hfii.l %>%
+  mutate(key=sub("^Q[1-5]_", "",key)) %>% 
+  rename(feature.ID = key) %>% 
+  mutate(assay="hfii",
+         Visit.number=pData$Visit.number[match(ID,pData$ID)]) %>% 
+  select(assay, IID, feature.ID, ID, value, Visit.number) -> hfii.long
+```
+
+## Sleep apnea score
+
+```{r}
+a.score%>%
+  rename(value = apnea_score) %>%
+  mutate(assay="apnea_score",
+         feature.ID = "apnea_score",
+         IID=pData$IID[match(ID,pData$ID)],
+         Visit.number=pData$Visit.number[match(ID,pData$ID)],
+         value=as.numeric(as.character(value))) %>% 
+  select(assay, IID, feature.ID, ID, value, Visit.number) -> a.score.long
+```
+
+## Activities and sleep
+```{r}
+load("/home/francesco.marabita/Projects/DHR/data/Other/Withings/Withings_summaries.RData")
+
+activity.df %>% 
+  bind_rows(sleep.df) %>% 
+  filter(value!="NaN", n.obs>10) %>% 
+  select(IID, Visit.number, type, value) %>% 
+  rename(feature.ID=type) %>% 
+  mutate(assay="activities_sleep") %>% 
+  left_join(as.data.frame(pData[,c("ID","IID", "Visit.number")])) %>% 
+  select(assay, IID, feature.ID, ID, value, Visit.number)-> withings.long
+```
+
+
+Bind all together and annotate.
+
+```{r}
+all.data.long <- bind_rows(as.data.frame(MAexp.long), s.score.long, f.tests.long, kk.long, hfii.long, a.score.long, withings.long)
+
+all.data.long <- unite(all.data.long, "group", c(assay, feature.ID),remove=F)
+all.data.long$group.num <- paste0("n",as.numeric(as.factor(all.data.long$group)))
+```
+Check that only 96 individuals are included.
+```{r}
+all.data.long <- all.data.long[all.data.long$IID %in% pData.IID$IID,]
+```
+
+# Preprocess 
+
+Scale the variables
+```{r}
+all.data.long %>% 
+  group_by(feature.ID, assay) %>% 
+  mutate(value.scaled = scale(value)) %>% 
+  as.data.frame() -> all.data.long
+```
+
+Regress effect of Sex if significantly associated.
+
+```{r}
+all.data.long %>% 
+  mutate(Sex=pData$Sex[match(ID,pData$ID)],
+         Age=pData$Age[match(ID,pData$ID)]) %>%
+  mutate(Sex=relevel(Sex, ref = "F")) -> all.data.long
+
+model.x<- function(y,x){ 
+  m <- lm(y ~ x, na.action = na.exclude)
+  return(residuals(m, type="response"))
+}
+
+model.x.signif<- function(y,x){ 
+  m <- lm(y ~ x, na.action = na.exclude)
+  return(summary(m)$coefficients[2,"Pr(>|t|)"] < 0.05)
+}
+
+all.data.long %>%
+  group_by(feature.ID, assay) %>%
+  mutate(value.sex.res=model.x(value.scaled, Sex),
+         sex.signif=model.x.signif(value.scaled, Sex)) %>% 
+  mutate(value.sex.adj=if_else(sex.signif,value.sex.res, value.scaled)) %>% 
+  as.data.frame -> all.data.long
+```
+
+Regress effect of Age if significantly associated.
+
+```{r}
+all.data.long %>%
+  group_by(feature.ID, assay) %>%
+  mutate(value.sex.age.res=model.x(value.sex.adj, as.numeric(Age)),
+         age.signif=model.x.signif(value.sex.adj, as.numeric(Age))) %>% 
+  mutate(value.sex.age.adj=if_else(age.signif,value.sex.age.res, value.sex.adj)) %>% 
+  as.data.frame()-> all.data.long
+```
+
+Create annotation data frame.
+```{r}
+
+case_assay_type <- function(assay) {
+  case_when(
+   grepl("^prot.+", assay) ~ "Protein",
+   grepl("^[GL]CMS.*", assay) ~ "Metabolite",
+   assay == "microb.16S" ~ "Mirobial",
+   assay == "clinical" ~ "Clinical",
+   assay == "stress.score" ~ "Stress score",
+   assay == "fitness.tests" ~ "Fitness tests",
+   assay == "kk" ~ "Kardiokompassi",
+   assay == "hfii" ~ "HFII",
+   assay == "apnea_score" ~ "Sleep apnea",
+   assay == "activities_sleep" ~ "Activities and sleep"
+  )
+}
+
+case_name <- function(type, feature.ID, feature.name) {
+  case_when(
+    type=="Clinical" ~ as.character(var.cat$Label[match(feature.ID, var.cat$feature.ID)]),
+    type=="Protein" ~  as.character(gsub("\\.", "-", gsub("^X[0-9]{1,3}_", "", feature.name))),
+    TRUE ~ as.character(feature.name)
+  )
+}
+
+all.data.long %>% 
+  select(group.num, group, feature.ID, assay) %>% 
+  distinct() %>% 
+  mutate(feature.name=annot.df$feature.name[match(feature.ID, annot.df$featureID)],
+         Uniprot.ID = annot.df$Uniprot.ID.1[match(feature.ID, annot.df$featureID)],
+         HMDB.ID = annot.df$HMDB.ID.1[match(feature.ID, annot.df$featureID)],
+         taxonomy = annot.df$taxonomy[match(feature.ID, annot.df$featureID)],
+         type=case_assay_type(assay),
+         feature.label=feature.name) %>%
+  mutate(feature.label=case_name(type, feature.ID, feature.name)) %>%
+  mutate(DB.ID=pmap_chr(.[c("Uniprot.ID", "HMDB.ID")], ~ paste(na.omit(c(...)), collapse = ','))) -> annot.nodes
+```
+
+# Cross correlation adjusted for sex and age
+
+Condider only the pairs of features of different type and with at least 200 observations.
+
+```{r}
+l.comb <- combn(unique(all.data.long$group.num),2, simplify = F)
+comb.df <- as.data.frame(do.call(rbind, l.comb), stringsAsFactors = F)
+colnames(comb.df) <- c("Source", "Target")
+comb.df$Source.type = annot.nodes$type[match(comb.df$Source, annot.nodes$group.num)]
+comb.df$Target.type = annot.nodes$type[match(comb.df$Target, annot.nodes$group.num)]
+comb.df <- comb.df[comb.df$Source.type != comb.df$Target.type,]
+comb.df$n.pairs <- NA
+
+all.data.long %>%
+  select(ID, group.num, value.sex.age.adj) %>% 
+  spread(key=group.num, value = value.sex.age.adj) %>% 
+  mutate(IID=pData$IID[match(ID, pData$ID)],
+         Visit.number=pData$Visit.number[match(ID, pData$ID)]) %>% 
+  select(ID, IID, Visit.number, everything()) -> all.data.wide
+```
+
+Calculate all pairwise correlations
+
+```{r}
+# corr2.df <- data.frame(r=rep(NA, nrow(comb.df)), p=rep(NA, nrow(comb.df)), df=rep(NA, nrow(comb.df)))
+# pb <- txtProgressBar(max = nrow(comb.df), style = 3)
+# for(i in 1:nrow(comb.df)){
+#   comb.df$n.pairs[i] <- sum(!is.na(all.data.wide[,comb.df$Source[i]] * all.data.wide[,comb.df$Target[i]]))
+#   # the model will estimate 97 parameters
+#   if(comb.df$n.pairs[i]>100){
+#     try({
+#       suppressWarnings({
+#         tmp.df <- all.data.wide[,c("IID", comb.df$Source[i], comb.df$Target[i])]
+# 
+#         corr2.df$r[i] <- rmcorr(participant = "IID", measure1 = comb.df$Source[i], measure2 = comb.df$Target[i], dataset = tmp.df)$r
+#         corr2.df$p[i] <- rmcorr(participant = "IID", measure1 = comb.df$Source[i], measure2 = comb.df$Target[i], dataset = tmp.df)$p
+#         corr2.df$df[i] <- rmcorr(participant = "IID", measure1 = comb.df$Source[i], measure2 = comb.df$Target[i], dataset = tmp.df)$df
+#       })
+#     })
+#   }
+# setTxtProgressBar(pb, i)
+# 
+# }
+# 
+# corr2.df <- cbind(comb.df, corr2.df)
+# save(corr2.df, file = paste0(outDir,"/DHR_within_corr_corr_df_v05.RData"))
+
+load(paste0(outDir,"/DHR_within_corr_corr_df_v05.RData"))
+
+```
+
+Check distribution of the variables.
+
+```{r}
+GGally::ggpairs(corr2.df,columns =c("n.pairs","r","p", "df"))
+```
+
+
+```{r}
+corr2.df %>%
+  rename(Estimate = r) %>% 
+  mutate(weight = abs(Estimate),
+         Source.type = annot.nodes$type[match(Source, annot.nodes$group.num)],
+         Target.type = annot.nodes$type[match(Target, annot.nodes$group.num)],
+         Source.feature.ID = annot.nodes$feature.ID[match(Source, annot.nodes$group.num)],
+         Source.feature.name = annot.nodes$feature.name[match(Source, annot.nodes$group.num)],
+         Target.feature.ID = annot.nodes$feature.ID[match(Target, annot.nodes$group.num)],
+         Target.feature.name = annot.nodes$feature.name[match(Target, annot.nodes$group.num)]) %>%
+  filter(!is.na(Estimate)) %>% 
+  mutate(FDR = p.adjust(p, method = "fdr")) -> corr2.df
+```
+
+Write table 
+```{r}
+write.table(annot.nodes, file = paste0(outDir, "/within_corr_annot_nodes.tsv"), quote = F, row.names = F, sep="\t")
+write.table(corr2.df, file = paste0(outDir, "/within_corr_adjusted_sex_age.tsv"), quote = F, row.names = F, sep="\t")
+write.table(all.data.wide, file = paste0(outDir, "/within_corr_input_data_adjusted_sex_age.tsv"), quote = F, row.names = F, sep="\t")
+```
+
+Plot p value histogram
+```{r}
+hist(corr2.df$Estimate)
+hist(corr2.df$p)
+hist(corr2.df$FDR)
+```
+
+Filter if the FDR<0.05 and weight>0.3
+```{r}
+corr2.df.fdr <- corr2.df[corr2.df$FDR<0.05 & corr2.df$weight>0.3,]
+```
+
+Create igraph 
+```{r}
+corr2.g <- graph.data.frame(corr2.df.fdr, directed = F,
+                            vertices=annot.nodes[annot.nodes$group.num %in% unique(c(corr2.df.fdr$Source, corr2.df.fdr$Target)),])
+corr2.g
+```
+
+Check degree distribution and hierarcical structure
+```{r}
+source("~/Rscripts/ggplot_smooth_func.r")
+d.dist <- data.frame(P=degree.distribution(corr2.g),
+                     k=0:max(max(degree(corr2.g))))
+ggplot(d.dist, aes(x=k, y=P))+
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_abline(slope=-1, intercept=0, lty=2, col="grey") +
+  stat_smooth_func(geom="text",method="lm",hjust=0,parse=T)+
+  scale_y_log10(limits=c(min(d.dist$P[is.finite(log10(d.dist$P))]), 1)) +
+  scale_x_log10() +
+  labs(x="log(k)", y="log(P_k)")
+
+c.coeff <- data.frame(C=transitivity(corr2.g, type = "local"),
+                      k=degree(corr2.g))
+ggplot(c.coeff, aes(x=k, y=C))+
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_abline(slope=-1, intercept=0, lty=2, col="grey") +
+  stat_smooth_func(geom="text",method="lm", hjust=0,parse=T)+
+  scale_y_log10(limits=c(min(c.coeff$C[is.finite(log10(c.coeff$C))]), 1)) +
+  scale_x_log10() +
+  labs(x="log(k)", y="log(C_k)")
+
+```
+
+Modularity with Louvain method.
+```{r}
+# corr2.g.l <- decompose.graph(corr2.g)
+# corr2.g.cc <- corr2.g.l[[which.max(sapply(corr2.g.l, vcount))]]
+comm.louv <- cluster_louvain(corr2.g, weights = E(corr2.g)$weight)
+corr2.g<- set.vertex.attribute(corr2.g, name="module.louvain", value = membership(comm.louv))
+
+modularity(corr2.g, membership = V(corr2.g)$module.louvain, weights = E(corr2.g)$weight)
+```
+
+Modularity with Leiden method.
+```{r}
+# corr2.g.l <- decompose.graph(corr2.g)
+# corr2.g.cc <- corr2.g.l[[which.max(sapply(corr2.g.l, vcount))]]
+require(leiden)
+set.seed(12345)
+comm.leid <- leiden(get.adjacency(corr2.g,attr = "weight"), partition_type = "ModularityVertexPartition")
+corr2.g <- set.vertex.attribute(corr2.g, name="module.leiden", value = comm.leid)
+
+modularity(corr2.g, membership = comm.leid, weights = E(corr2.g)$weight)
+```
+
+Plot the largest connected component.
+
+```{r}
+weight.community=function(row, membership, weigth.within, weight.between){
+  if(as.numeric(membership[which(names(membership)==row[1])])==as.numeric(membership[which(names(membership)==row[2])])){
+    weight=weigth.within
+  }else{
+    weight=weight.between
+  }
+  return(weight)
+}
+
+tmp.l <- decompose.graph(corr2.g)
+tmp <- tmp.l[[which.max(sapply(tmp.l, vcount))]]
+tmp.m <- cluster_louvain(tmp, weights = E(tmp)$weight)
+E(tmp)$weight=apply(get.edgelist(tmp),1, weight.community, membership(tmp.m), 100, 1)
+tmp$layout=layout.fruchterman.reingold(tmp,weights=E(tmp)$weight)
+plot(tmp.m, tmp, vertex.label=NA)
+```
+
+Write graph file
+
+```{r}
+write.graph(corr2.g, file = paste0(outDir,"/within_corr_adjusted_sex_age.graphml"), format = "graphml")
+```
+
+Reactome with Louvain communities
+```{r}
+comm.louv.m <- membership(comm.louv)
+
+react.m.list <- list()
+
+for(i in sort(unique(comm.louv.m))){
+  try({
+    tmp <- names(comm.louv.m)[comm.louv.m==i]
+    tmp <- annot.nodes$DB.ID[annot.nodes$group.num %in% tmp]
+    tmp <- tmp[tmp!=""]
+
+    write.table(tmp, paste0(outDir,"/target.txt"), sep="\n", quote = F, row.names = F, col.names = F)
+    system(paste0('curl -H "Content-Type: text/plain" --data-binary @',outDir,'/target.txt -X POST --url https://reactome.org/AnalysisService/identifiers/projection/ > ',outDir,'/results.json'))
+
+    react.m.list[[i]] <- fromJSON(paste0(outDir,"/results.json"), flatten = T)
+    react.m.list[[i]]$module <- paste0("Module_",i)
+  })
+
+}
+
+htmltools::tagList(
+  lapply(react.m.list, function(x) DT::datatable(as.data.frame(x$pathways), options = list(scrollX=T),
+                                                 caption =x$module))
+)
+
+```
+
+Export the feature names for IMPaLA pathway analysis with the webserver
+```{r}
+dir.create(paste0(outDir,"/within_louvain_modules"))
+
+for(i in sort(unique(comm.louv.m))){
+  
+  tmp <- names(comm.louv.m)[comm.louv.m==i]
+  tmp <- annot.nodes$Uniprot.ID[annot.nodes$group.num %in% tmp]
+  tmp <- tmp[tmp!=""]
+  tmp <- tmp[!is.na(tmp)]
+  
+  write.table(tmp, paste0(outDir,"/within_louvain_modules/louvain_",i,"_proteins.txt"), sep="\n", quote = F, row.names = F, col.names = F)
+  
+  tmp <- names(comm.louv.m)[comm.louv.m==i]
+  tmp <- annot.nodes$HMDB.ID[annot.nodes$group.num %in% tmp]
+  tmp <- tmp[tmp!=""]
+  tmp <- tmp[!is.na(tmp)]
+  
+  write.table(tmp, paste0(outDir,"/within_louvain_modules/louvain_",i,"_metabolites.txt"), sep="\n", quote = F, row.names = F, col.names = F)
+  
+}
+
+tmp <- annot.nodes$Uniprot.ID
+tmp <- tmp[tmp!=""]
+tmp <- tmp[!is.na(tmp)]
+write.table(tmp, paste0(outDir,"/within_louvain_modules/background_proteins.txt"), sep="\n", quote = F, row.names = F, col.names = F)
+
+tmp <- annot.nodes$HMDB.ID
+tmp <- tmp[tmp!=""]
+tmp <- tmp[!is.na(tmp)]
+write.table(tmp, paste0(outDir,"/within_louvain_modules/background_metabolites.txt"), sep="\n", quote = F, row.names = F, col.names = F)
+
+```

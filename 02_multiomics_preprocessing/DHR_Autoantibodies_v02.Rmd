@@ -1,0 +1,276 @@
+---
+title: "DHR Autoantibodies v02"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+Require all the libraries
+```{r}
+require(SummarizedExperiment)
+require(tidyverse)
+require(plotly)
+require(geneplotter)
+require(RColorBrewer)
+require(openxlsx)
+require(factoextra)
+require(FactoMineR)
+require(ICC)
+```
+
+Read the data and store as SummarizedExperiment. Include only IID present in clinical data file. (i.e. exclude dropouts)
+
+```{r}
+outDir <- "/home/francesco.marabita/Projects/DHR/data/Autoantibodies/out"
+load("/home/francesco.marabita/Projects/DHR/data/Clinical/Clin_data_2018-02-13.RData")
+
+
+autoab.file <- list.files("/home/francesco.marabita/Projects/DHR/data/Autoantibodies/", pattern ="^Autoantibodies_.*\\.xlsx$",full.names = T)
+
+assayData_MFI <- read.xlsx(autoab.file, sheet = "assayData_MFI", colNames =T, rowNames = T, skipEmptyRows=T)
+# change "*" to "." in rownames
+rownames(assayData_MFI) <- make.names(rownames(assayData_MFI))
+
+assayData_Scoring <- read.xlsx(autoab.file, sheet = "assayData_Scoring", colNames = T, rowNames = T, skipEmptyRows=T)
+# change "*" to "." in rownames
+rownames(assayData_Scoring) <- make.names(rownames(assayData_Scoring))
+
+assayData_Binary <- read.xlsx(autoab.file, sheet = "assayData_Binary", colNames = T, rowNames = T, skipEmptyRows=T)
+# change "*" to "." in rownames
+rownames(assayData_Binary) <- make.names(rownames(assayData_Binary))
+
+fData <- read.xlsx(autoab.file, sheet = "fData", colNames =T, rowNames = F, skipEmptyRows=T)
+rownames(fData) <- make.names(fData$Gene_HPRR_ID)
+
+pData_ <- read.xlsx(autoab.file, sheet = "pData", colNames =T, rowNames = F, skipEmptyRows=T)
+
+tmp <- as.data.frame(clin.data[, c("ID", "visit_id", "VISITnumber", "dateofbirth", "Age", "Visit", "Visittime", "Sex")])
+colnames(tmp) <- c("IID", "ID", "Visit.number", "Birth.date", "Age", "Visit.date", "Visit.time", "Sex")
+pData <- merge(pData_, tmp, by=c("ID", "IID", "Visit.number"), all.x=T, sort=F)
+
+pData <- pData[match(pData_$ID, pData$ID),]
+rownames(pData) <- pData$ID
+
+
+gc()
+
+# create SummarizedExperiment
+if(all(rownames(assayData_MFI)==rownames(assayData_Scoring)) &
+   all(colnames(assayData_MFI)==colnames(assayData_Scoring)) &
+   all(rownames(assayData_Scoring)==rownames(assayData_Binary)) &
+   all(colnames(assayData_Scoring)==colnames(assayData_Binary)) &
+   all(rownames(assayData_MFI)==rownames(fData)) &
+   all(colnames(assayData_MFI)==rownames(pData))){
+autoab.se <- SummarizedExperiment(assays = list(MFI=as.matrix(assayData_MFI), 
+                                                  Scoring=as.matrix(assayData_Scoring),
+                                                  Binary=as.matrix(assayData_Binary)),
+                                    rowData = DataFrame(fData),
+                                    colData = DataFrame(pData))
+
+# log2 transform
+assays(autoab.se)$log2MFI <- log2(assays(autoab.se)$MFI)
+
+#Quantile Normalization
+assays(autoab.se)$log2NMFI <- normalizeQuantiles(assays(autoab.se)$log2MFI)
+
+#PQN: probabilistic quotient normalization
+#https://pubs.acs.org/doi/abs/10.1021/ac051632c
+# 1. Perform an integral normalization (typically a constant integral of 100 is used).
+# 2. Choose/calculate the reference spectrum (the best approach is the calculation of the median spectrum of control samples).
+# 3. Calculate the quotients of all variables of interest of the test spectrum with those of the reference spectrum.
+# 4. Calculate the median of these quotients.
+# 5. Divide all variables of the test spectrum by this median.
+
+
+X.scaled <- apply(assays(autoab.se)$MFI, 2, function(x) x/sum(x, na.rm = TRUE)*100)
+med <- rowMedians(X.scaled)
+X.norm <- matrix(nrow = nrow(autoab.se), ncol = ncol(autoab.se))
+for (a in 1:ncol(autoab.se)) {
+		X.norm[,a] <- as.numeric(X.scaled[,a]/median(X.scaled[,a]/med))
+}
+
+assays(autoab.se)$log2PQN <- log2(X.norm)
+
+} else { stop("Order is different") }
+
+# include only subjects present in clin.data
+
+autoab.se <- autoab.se[,autoab.se$IID %in% unique(clin.data$ID)]
+
+```
+
+# Quality control
+In order to check for sample-to-sample relationship, outliers and batch effects, I consider the following:
+
+* Missing values
+* Density plot
+* Boxpots
+* PCA
+* Pairwise scatterplots
+
+```{r}
+
+plot(autoab.se$Num, colSums(assays(autoab.se)$Scoring<0.5)/nrow(autoab.se),
+     main="Fraction of NAs per sample", xlab="order", ylab="Fraction of NAs")
+
+barplot(rowSums(assays(autoab.se)$Scoring<0.5)/ncol(autoab.se),
+         main="Fraction of NAs per feature")
+```
+
+```{r}
+minfi::densityPlot(assays(autoab.se)$log2MFI, legend = F, main="MFI", sampGroups = autoab.se$IID, xlab="log2MFI")
+multiecdf(assays(autoab.se)$log2MFI, legend = F, main="MFI", col="black")
+
+minfi::densityPlot(assays(autoab.se)$log2NMFI, legend = F, main="Normalized MFI", sampGroups = autoab.se$IID, xlab="log2NMFI")
+multiecdf(assays(autoab.se)$log2NMFI, legend = F, main="Normalized MFI", col="black")
+
+minfi::densityPlot(assays(autoab.se)$log2PQN, legend = F, main="PQN MFI", sampGroups = autoab.se$IID, xlab="log2PQN")
+multiecdf(assays(autoab.se)$log2PQN, legend = F, main="PQN MFI", col="black")
+
+```
+
+```{r  fig.height=20}
+temp.l <- as.data.frame(assays(autoab.se)$log2MFI) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "log2MFI", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=log2MFI))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("MFI")+
+  theme(legend.position="none")
+
+temp.l <- as.data.frame(assays(autoab.se)$log2NMFI) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "log2NMFI", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=log2NMFI))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("Normalized MFI")+
+  theme(legend.position="none")
+
+
+temp.l <- as.data.frame(assays(autoab.se)$log2PQN) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "log2PQN", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=log2PQN))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("PQN MFI")+
+  theme(legend.position="none")
+```
+
+Calculate Intraclass Correlation Coefficient (ICC) to score the normalization methods. In principle, samples belonging to the same subject should be more similar to each other.
+
+```{r message=FALSE, warning=FALSE, results="hide"}
+ICC.m <- matrix(nrow=nrow(autoab.se), ncol = 4,
+                dimnames = list(rownames(autoab.se),  c("MFI", "log2MFI", "log2NMFI", "log2PQN")))
+for(i in 1:nrow(autoab.se)){
+  trash <- capture.output(ICC.m[i,1] <- ICCbare(IID,MFI, data=data.frame(IID=autoab.se$IID,
+                                                                        MFI=assays(autoab.se)$MFI[i,])))
+  trash <- capture.output(ICC.m[i,2] <- ICCbare(IID,log2MFI, data=data.frame(IID=autoab.se$IID,
+                                                                            log2MFI=assays(autoab.se)$log2MFI[i,])))
+  trash <- capture.output(ICC.m[i,3] <- ICCbare(IID,log2NMFI, data=data.frame(IID=autoab.se$IID,
+                                                                             log2NMFI=assays(autoab.se)$log2NMFI[i,])))
+  trash <- capture.output(ICC.m[i,4] <- ICCbare(IID,log2PQN, data=data.frame(IID=autoab.se$IID,
+                                                                            log2PQN=assays(autoab.se)$log2PQN[i,])))
+}
+```
+
+```{r}
+boxplot(ICC.m)
+
+as.data.frame(colMeans(ICC.m))
+
+as.data.frame(colQuantiles(ICC.m))
+
+comb2 <- combn(colnames(ICC.m), 2)
+for(i in 1:ncol(comb2)){
+  print(paste0(comb2[1,i], " - ", comb2[2,i]))
+  print(wilcox.test(ICC.m[,comb2[1,i]], ICC.m[,comb2[2,i]]))
+}
+```
+
+ICC is not statistically different between log2MFI and log2PQN, but it seems to differ between log2MFI - log2NMFI. I also do PCA to correlate with the pheno and technical variables.
+
+```{r}
+# p.df <- colData(autoab.se)[,apply(colData(autoab.se),2,function(x) length(unique(x)))!=1]
+# p.df <- colData(autoab.se)[,apply(p.df,2,function(x) length(unique(x)))!=ncol(autoab.se)]
+sel.col <- c("Assay","AssayPos","Quadrant", "Pos96", "Plate", "Well96", "Sex.x","Age.x", "WashCol",
+             "ID", "VISITnumber", "Sex.y", "Age.y") 
+p.df <- colData(autoab.se)[,colnames(colData(autoab.se)) %in% sel.col]
+
+for(assay in c("MFI", "log2PQN")){
+  pca <- prcomp(t(assays(autoab.se)[[assay]]))
+pcaPV.m <- matrix(nrow=20, ncol=ncol(p.df))
+colnames(pcaPV.m) <- colnames(p.df)
+
+for(c in 1:20){
+  for(f in 1:ncol(p.df)){
+    if(class(p.df[,f])!="numeric"){
+      pcaPV.m[c,f] <- kruskal.test(pca$x[,c] ~ as.factor(p.df[,f]))$p.value
+    } else {
+      pcaPV.m[c,f] <- summary(lm(pca$x[,c] ~ p.df[,f]))$coeff[2,4]
+    }
+  }
+}
+
+source("/home/francesco.marabita/Rscripts/plot_SVDpval.r")
+plotSVDp(pcaPV.m, topPCA= 20,  xpd=T, main="")
+  
+}
+
+
+```
+
+I select log2PQN.
+
+```{r}
+
+tmp <- as.data.frame(assays(autoab.se)$log2PQN)
+colnames(tmp) <- paste0(autoab.se$IID, "_", autoab.se$Visit.number)
+prcomp(t(tmp)) -> tmp
+
+p1 <- fviz_pca_ind(tmp, col.ind = as.factor(autoab.se$Assay),
+                   geom.ind = "point", mean.point=F,  pointshape=19)+
+  scale_color_discrete(name="Assay")
+
+p2 <- fviz_pca_ind(tmp, col.ind = as.factor(autoab.se$Assay),
+                   geom.ind = c("point", "text"), mean.point=F, pointshape=19)+
+  scale_color_discrete(name="Assay")
+
+
+p3 <- fviz_pca_ind(tmp, col.ind = as.factor(autoab.se$Plate),
+                   geom.ind = "point", mean.point=F, pointshape=19)+
+  scale_color_discrete(name="Plate")
+
+
+p4 <- fviz_pca_ind(tmp, col.ind = as.factor(autoab.se$WashCol),
+                   geom.ind = "point", mean.point=F,  pointshape=19)+
+  scale_color_discrete(name="WashCol")
+
+p5 <- fviz_pca_ind(tmp, col.ind = autoab.se$Sex.x,
+                   geom.ind = "point", mean.point=F, pointshape=19)+
+    scale_color_discrete(name="Sex")
+
+p6 <- fviz_pca_ind(tmp, col.ind = as.factor(autoab.se$Quadrant),
+                   geom.ind = "point", mean.point=F, pointshape=19)+
+    scale_color_discrete(name="Quadrant")
+
+
+print(p1)
+print(p2)
+print(p3)
+print(p4)
+print(p5)
+print(p6)
+
+```
+

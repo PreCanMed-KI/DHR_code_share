@@ -1,0 +1,793 @@
+---
+title: "DHR LCMS v03"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+Require all the libraries
+```{r}
+require(SummarizedExperiment)
+require(tidyverse)
+require(openxlsx)
+require(plotly)
+require(limma)
+require(geneplotter)
+require(factoextra)
+require(impute)
+require(sva)
+require(ruv)
+require(corrplot)
+require(RColorBrewer)
+require(ICC)
+```
+
+# Read the data
+
+Read the data and store as SummarizedExperiment. Create two separate objects for negative and positive mode data.
+
+```{r}
+outDir <- "/home/francesco.marabita/Projects/DHR/data/Metabolomics/out/LCMS"
+#dir.create(outDir)
+
+# read data
+assayData.neg <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Metabolomics/All_LCMS_2018-11-09.xlsx",
+                       sheet = "assayData-neg", colNames =T, rowNames = T, skipEmptyRows=T)
+assayData.pos <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Metabolomics/All_LCMS_2018-11-09.xlsx",
+                       sheet = "assayData-pos", colNames =T, rowNames = T, skipEmptyRows=T)
+
+fData.neg <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Metabolomics/All_LCMS_2018-11-09.xlsx",
+                       sheet = "fData-neg", colNames =T, rowNames = F, skipEmptyRows=T)
+rownames(fData.neg) <- fData.neg$feature.ID
+fData.pos <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Metabolomics/All_LCMS_2018-11-09.xlsx",
+                       sheet = "fData-pos", colNames =T, rowNames = F, skipEmptyRows=T)
+rownames(fData.pos) <- fData.pos$feature.ID
+
+pData.neg_ <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Metabolomics/All_LCMS_2018-11-09.xlsx",
+                       sheet = "pData-neg", colNames =T, rowNames = F, skipEmptyRows=T)
+pData.pos_ <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Metabolomics/All_LCMS_2018-11-09.xlsx",
+                       sheet = "pData-pos", colNames =T, rowNames = F, skipEmptyRows=T)
+
+# add 
+load("/home/francesco.marabita/Projects/DHR/data/Clinical/Clin_data_2018-02-13.RData")
+
+tmp <- as.data.frame(clin.data[, c("ID", "visit_id", "VISITnumber", "dateofbirth", "Age", "Visit", "Visittime", "Sex")])
+colnames(tmp) <- c("IID", "ID", "Visit.number", "Birth.date", "Age", "Visit.date", "Visit.time", "Sex")
+
+pData.neg <- merge(pData.neg_, tmp, by=c("ID", "IID", "Visit.number"), all.x=T, sort=F)
+pData.neg <- pData.neg[match(pData.neg_$ID, pData.neg$ID),]
+rownames(pData.neg) <- pData.neg$ID
+
+pData.pos <- merge(pData.pos_, tmp, by=c("ID", "IID", "Visit.number"), all.x=T, sort=F)
+pData.pos <- pData.pos[match(pData.pos_$ID, pData.pos$ID),]
+rownames(pData.pos) <- pData.pos$ID
+
+if(all.equal(pData.neg, pData.pos)) {
+  pData <- pData.neg
+}  else { stop("pData data.frames are different") }
+
+# create SummarizedExperiment
+LCMS.neg.se <- SummarizedExperiment(assays = list(RC=as.matrix(assayData.neg)))
+LCMS.pos.se <- SummarizedExperiment(assays = list(RC=as.matrix(assayData.pos)))
+
+if(all(rownames(LCMS.neg.se)==rownames(fData.neg)) & all(colnames(LCMS.neg.se)==rownames(pData))) {
+  rowData(LCMS.neg.se) <- DataFrame(fData.neg)
+  colData(LCMS.neg.se) <- DataFrame(pData)
+} else { stop("Order is different") }
+
+if(all(rownames(LCMS.pos.se)==rownames(fData.pos)) & all(colnames(LCMS.pos.se)==rownames(pData))) {
+  rowData(LCMS.pos.se) <- DataFrame(fData.pos)
+  colData(LCMS.pos.se) <- DataFrame(pData)
+} else { stop("Order is different") }
+
+
+# include only subjects present in clin.data
+LCMS.neg.se <- LCMS.neg.se[,LCMS.neg.se$IID %in% unique(clin.data$ID)]
+LCMS.pos.se <- LCMS.pos.se[,LCMS.pos.se$IID %in% unique(clin.data$ID)]
+
+# remove samples in LCMS-pos that failed completely (100% NAs)
+LCMS.pos.se <- LCMS.pos.se[,!colSums(is.na(assays(LCMS.pos.se)$RC))==nrow(LCMS.pos.se)]
+```
+
+ Contrary to GCMS data, there are a lot of missing values.
+
+```{r}
+plot(LCMS.neg.se$Runorder, colSums(is.na(assays(LCMS.neg.se)$RC))/nrow(LCMS.neg.se),
+     main="Fraction of NAs per sample - LCMS-neg", xlab="Run order", ylab="Fraction of NAs")
+plot(LCMS.pos.se$Runorder, colSums(is.na(assays(LCMS.pos.se)$RC))/nrow(LCMS.pos.se),
+     main="Fraction of NAs per sample - LCMS-pos", xlab="Run order", ylab="Fraction of NAs")
+
+barplot(rowSums(is.na(assays(LCMS.neg.se)$RC))/ncol(LCMS.neg.se),
+         main="Fraction of NAs per feature - LCMS-neg")
+barplot(rowSums(is.na(assays(LCMS.pos.se)$RC))/ncol(LCMS.pos.se),
+         main="Fraction of NAs per feature - LCMS-pos")
+```
+I will consider only identified metabilited detected in at least 75% of the subjects.
+
+```{r}
+# Remove unidentified LCMS features
+feat.out <- rownames(LCMS.neg.se)[grepl("^Peak_", rowData(LCMS.neg.se)$Metabolite.name)]
+LCMS.neg.se <- LCMS.neg.se[!rownames(LCMS.neg.se) %in% feat.out,]
+feat.out <- rownames(LCMS.pos.se)[grepl("^Peak_", rowData(LCMS.pos.se)$Metabolite.name)]
+LCMS.pos.se <- LCMS.pos.se[!rownames(LCMS.pos.se) %in% feat.out,]
+
+# Remove features with > 75% NAs
+LCMS.neg.se <- LCMS.neg.se[rowSums(!is.na(assays(LCMS.neg.se)$RC)) > (0.75*ncol(LCMS.neg.se)),]
+LCMS.pos.se <- LCMS.pos.se[rowSums(!is.na(assays(LCMS.pos.se)$RC)) > (0.75*ncol(LCMS.pos.se)),]
+
+plot(LCMS.neg.se$Runorder, colSums(is.na(assays(LCMS.neg.se)$RC))/nrow(LCMS.neg.se),
+     main="Fraction of NAs per sample - LCMS-neg", xlab="Run order", ylab="Fraction of NAs")
+plot(LCMS.pos.se$Runorder, colSums(is.na(assays(LCMS.pos.se)$RC))/nrow(LCMS.pos.se),
+     main="Fraction of NAs per sample - LCMS-pos", xlab="Run order", ylab="Fraction of NAs")
+
+barplot(rowSums(is.na(assays(LCMS.neg.se)$RC))/ncol(LCMS.neg.se),
+         main="Fraction of NAs per feature - LCMS-neg")
+barplot(rowSums(is.na(assays(LCMS.pos.se)$RC))/ncol(LCMS.pos.se),
+         main="Fraction of NAs per feature - LCMS-pos")
+```
+
+Convert the Relative Concentration (RC) values top log2(RC) and impute missing values with KNN.
+
+```{r}
+assays(LCMS.neg.se)$log2RC <- log2(assays(LCMS.neg.se)$RC)
+assays(LCMS.neg.se)$log2RC <- impute.knn(assays(LCMS.neg.se)$log2RC, maxp = nrow(LCMS.neg.se)+1)$data
+assays(LCMS.pos.se)$log2RC <- log2(assays(LCMS.pos.se)$RC)
+assays(LCMS.pos.se)$log2RC <- impute.knn(assays(LCMS.pos.se)$log2RC, maxp = nrow(LCMS.pos.se)+1)$data
+```
+
+Check the time drift for IS and metabolites.
+
+```{r}
+as.data.frame(assays(LCMS.neg.se)$log2RC) %>% 
+  mutate(feature=rownames(.), type=ifelse(grepl("IS", rownames(.),fixed = T), "IS", "metabolite")) %>% 
+  gather(key =  "ID", value = "log2RC", -(feature:type)) %>% 
+  group_by(feature) %>% 
+  mutate(z.score.feature = (log2RC - mean(log2RC)) / sd(log2RC))-> temp.l
+temp.l$Runorder <- LCMS.neg.se$Runorder[match(temp.l$ID, LCMS.neg.se$ID)]
+
+subset(temp.l, type=="IS") %>% 
+ggplot(aes(x=Runorder, y=log2RC)) +
+  geom_point(aes(col=feature), alpha=0.5) +
+  geom_smooth(aes(col=feature), method="loess")
+
+subset(temp.l, type=="IS") %>% 
+ggplot(aes(x=Runorder, y=z.score.feature)) +
+  geom_point(aes(col=feature), alpha=0.5) +
+  geom_smooth(aes(col=feature), method="loess")
+
+ggplot(temp.l, aes(x=Runorder, y=z.score.feature)) +
+  geom_smooth()
+
+
+as.data.frame(assays(LCMS.pos.se)$log2RC) %>% 
+  mutate(feature=rownames(.), type=ifelse(grepl("IS", rownames(.),fixed = T), "IS", "metabolite")) %>% 
+  gather(key =  "ID", value = "log2RC", -(feature:type)) %>%
+  group_by(feature) %>% 
+  mutate(z.score.feature = (log2RC - mean(log2RC)) / sd(log2RC))-> temp.l
+temp.l$Runorder <- LCMS.pos.se$Runorder[match(temp.l$ID, LCMS.pos.se$ID)]
+
+subset(temp.l, type=="IS") %>% 
+ggplot(aes(x=Runorder, y=log2RC)) +
+  geom_point(aes(col=feature), alpha=0.5) +
+  geom_smooth(aes(col=feature), method="loess")
+
+subset(temp.l, type=="IS") %>% 
+ggplot(aes(x=Runorder, y=z.score.feature)) +
+  geom_point(aes(col=feature), alpha=0.5) +
+  geom_smooth(aes(col=feature), method="loess")
+
+ggplot(temp.l, aes(x=Runorder, y=z.score.feature)) +
+  geom_smooth()
+
+
+```
+
+
+# Quality control
+In order to check for sample-to-sample relationship, outliers and batch effects, I consider the following:
+
+* Density plot
+* Boxpots
+* PCA
+* Pairwise scatterplots
+
+```{r}
+multidensity(assays(LCMS.neg.se)$log2RC, legend = F, main="LCMS-neg",
+             xlab="log2 Relative Concentration", xlim=c(0,30))
+multidensity(assays(LCMS.pos.se)$log2RC, legend = F, main="LCMS-pos",
+             xlab="log2 Relative Concentration", xlim=c(0,30))
+```
+
+
+```{r  fig.height=20}
+temp.l <- as.data.frame(assays(LCMS.neg.se)$log2RC) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "log2RC", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=log2RC))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("log2RC - LCMS-neg")+
+  theme(legend.position="none")
+
+temp.l <- as.data.frame(assays(LCMS.pos.se)$log2RC) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "log2RC", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=log2RC))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("log2RC - LCMS-pos")+
+  theme(legend.position="none")
+```
+
+Finally, I make a PCA plot, coloring by the runorder  (`Runorder`), as I do not have or the experimental batch (`Analytical.Batch`) or the runorder time in minutes (`Exp.Time.Difference.minutes`), similarly to the GCMS data.
+```{r}
+temp <- t(assays(LCMS.neg.se)$log2RC)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(temp, center=T, scale.=F)$x[,1],
+                y=prcomp(temp, center=T, scale.=F)$x[,2],
+                col = LCMS.neg.se$Runorder),
+            label=LCMS.neg.se$IID)
+
+
+temp <- t(assays(LCMS.pos.se)$log2RC)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(temp, center=T, scale.=F)$x[,1],
+                y=prcomp(temp, center=T, scale.=F)$x[,2],
+                col = LCMS.pos.se$Runorder),
+            label=LCMS.pos.se$IID)
+
+rm(temp)
+```
+# Normalization
+I will compare Quantile Normalization, Median Scaling, RUV4. I do not have a categorical batch variable (not annotated), therefore I will not evaluate ComBat
+
+## Quantile Normalization
+```{r}
+assays(LCMS.neg.se)$log2QNRC <- normalizeQuantiles(assays(LCMS.neg.se)$log2RC)
+assays(LCMS.pos.se)$log2QNRC <- normalizeQuantiles(assays(LCMS.pos.se)$log2RC)
+```
+
+
+```{r}
+multidensity(assays(LCMS.neg.se)$log2QNRC, legend = F, main="Quantile Norm",
+             xlab="Relative concentration", xlim=c(0,40))
+multidensity(assays(LCMS.pos.se)$log2QNRC, legend = F, main="Quantile Norm",
+             xlab="Relative concentration", xlim=c(0,40))
+
+```
+
+```{r}
+temp <- t(assays(LCMS.neg.se)$log2QNRC)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(temp, center=T, scale.=F)$x[,1],
+                y=prcomp(temp, center=T, scale.=F)$x[,2],
+                col = LCMS.neg.se$Runorder),
+            label=LCMS.neg.se$IID)
+
+
+temp <- t(assays(LCMS.pos.se)$log2QNRC)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(temp, center=T, scale.=F)$x[,1],
+                y=prcomp(temp, center=T, scale.=F)$x[,2],
+                col = LCMS.pos.se$Runorder),
+            label=LCMS.pos.se$IID)
+
+rm(temp)
+```
+
+
+## Median Scaling
+```{r}
+assays(LCMS.neg.se)$log2NRC <- normalizeBetweenArrays(assays(LCMS.neg.se)$log2RC, method = "scale")
+assays(LCMS.pos.se)$log2NRC <- normalizeBetweenArrays(assays(LCMS.pos.se)$log2RC, method = "scale")
+```
+
+
+```{r}
+multidensity(assays(LCMS.neg.se)$log2NRC, legend = F, main="Median Scaling",
+             xlab="Relative concentration", xlim=c(0,40))
+multidensity(assays(LCMS.pos.se)$log2NRC, legend = F, main="Median Scaling",
+             xlab="Relative concentration", xlim=c(0,40))
+
+```
+
+```{r}
+temp <- t(assays(LCMS.neg.se)$log2NRC)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(temp, center=T, scale.=F)$x[,1],
+                y=prcomp(temp, center=T, scale.=F)$x[,2],
+                col = LCMS.neg.se$Runorder),
+            label=LCMS.neg.se$IID)
+
+
+temp <- t(assays(LCMS.pos.se)$log2NRC)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(temp, center=T, scale.=F)$x[,1],
+                y=prcomp(temp, center=T, scale.=F)$x[,2],
+                col = LCMS.pos.se$Runorder),
+            label=LCMS.pos.se$IID)
+
+rm(temp)
+```
+
+## RUV4
+
+With RUV4, I will use the Internal Standards (ISs) as negative control metabolites, with the assumption that they are not influenced by biological variation, but any observed variability in the IS is enitirelly introduced byt the experimental steps. The method requires the coiche of an optimal number of K, which is not trivial. RUV4 however is less sensitive to the number of Ks as compared to RUV2. I will evaluate the correlation of the unobserved covariates W with the control genes, as well as the distribution of the relative concentrations. The method requires to specify a design matrix, and for this purpose I use the individual (`IID`) and the visit numer (`Visit.number`) as covariate. I first get a rough estimation of the Ks with the "leave1out" method.
+
+```{r}
+numk <- getK(Y = t(assays(LCMS.neg.se)$log2RC) ,
+             X = cbind(LCMS.neg.se$IID,as.factor(LCMS.neg.se$Visit.number)),
+             ctl = grepl("_IS_", rownames(LCMS.neg.se), fixed=T),
+             method = "leave1out")
+
+numk$k
+
+numk <- getK(Y = t(assays(LCMS.pos.se)$log2RC) ,
+             X = cbind(LCMS.pos.se$IID,as.factor(LCMS.pos.se$Visit.number)),
+             ctl = grepl("_IS_", rownames(LCMS.pos.se), fixed=T),
+             method = "leave1out")
+numk$k
+```
+
+```{r}
+fit.neg <- RUV4(Y = t(assays(LCMS.neg.se)$log2RC),
+                X = cbind(LCMS.neg.se$IID, as.factor(LCMS.neg.se$Visit.number)),
+                ctl = grepl("_IS_", rownames(LCMS.neg.se), fixed=T),
+                k=2)
+fit.pos <- RUV4(Y = t(assays(LCMS.pos.se)$log2RC),
+                X = cbind(LCMS.pos.se$IID, as.factor(LCMS.pos.se$Visit.number)),
+                ctl = grepl("_IS_", rownames(LCMS.pos.se), fixed=T),
+                k=1)
+
+```
+
+The normalized conncentrations are then obtained by removing the effect of the W components. From the RUV4 documentation, `W`	represent the estimated unwanted factors and `alpha`is the estimated coefficients of `W`.
+
+```{r}
+assays(LCMS.neg.se)$ruv4RC <- t(t(assays(LCMS.neg.se)$log2RC) - fit.neg$W %*% fit.neg$alpha)
+assays(LCMS.pos.se)$ruv4RC <- t(t(assays(LCMS.pos.se)$log2RC) - fit.pos$W %*% fit.pos$alpha)
+```
+
+
+```{r}
+temp <- t(assays(LCMS.neg.se)$ruv4RC)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Runorder,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(temp, center=T, scale.=F)$x[,1],
+                y=prcomp(temp, center=T, scale.=F)$x[,2],
+                col = LCMS.neg.se$Runorder),
+            label=LCMS.neg.se$IID)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.neg.se$Sex, axes = c(1,2),
+             geom.ind = "point", mean.point=F, pointshape=19)
+
+temp <- t(assays(LCMS.pos.se)$ruv4RC)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Runorder,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(temp, center=T, scale.=F)$x[,1],
+                y=prcomp(temp, center=T, scale.=F)$x[,2],
+                col = LCMS.pos.se$Runorder),
+            label=LCMS.pos.se$IID)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = LCMS.pos.se$Sex, axes = c(1,2),
+             geom.ind = "point", mean.point=F, pointshape=19)
+
+rm(temp)
+```
+```{r}
+data.frame(Runorder=LCMS.neg.se$Runorder, as.data.frame(fit.neg$W)) %>%
+  gather(key = "W", value="value", -Runorder) %>% 
+  ggplot(aes(x=Runorder, y=value))+
+  geom_point(aes(col=Runorder))+
+  facet_wrap(~ W, scales="free")
+
+data.frame(Runorder=LCMS.pos.se$Runorder, as.data.frame(fit.pos$W)) %>%
+  gather(key = "W", value="value", -Runorder) %>% 
+  ggplot(aes(x=Runorder, y=value))+
+  geom_point(aes(col=Runorder))+
+  facet_wrap(~ W, scales="free")
+```
+
+```{r}
+data.frame(as.data.frame(t(assays(LCMS.neg.se[grepl("_IS_", rownames(LCMS.neg.se), fixed=T),])$log2RC)),
+           Runorder=LCMS.neg.se$Runorder) %>%
+  mutate(type="log2RC") %>% 
+  gather(key="IS", value="value", -c(Runorder:type)) -> temp1
+
+data.frame(as.data.frame(t(assays(LCMS.neg.se[grepl("_IS_", rownames(LCMS.neg.se), fixed=T),])$ruv4RC)),
+           Runorder=LCMS.neg.se$Runorder) %>%
+  mutate(type="ruv4RC") %>% 
+  gather(key="IS", value="value", -c(Runorder:type)) -> temp2
+
+temp <- rbind(temp1, temp2)
+
+ggplot(temp, aes(x=Runorder, y=value))+
+  geom_point(aes(col=type), alpha=0.3)+
+  geom_smooth(aes(group=type, lty=type), se = T, method = "lm")+
+  facet_wrap(~ IS, scale="fixed")
+
+
+data.frame(as.data.frame(t(assays(LCMS.pos.se[grepl("_IS_", rownames(LCMS.pos.se), fixed=T),])$log2RC)),
+           Runorder=LCMS.pos.se$Runorder) %>%
+  mutate(type="log2RC") %>% 
+  gather(key="IS", value="value", -c(Runorder:type)) -> temp1
+
+data.frame(as.data.frame(t(assays(LCMS.pos.se[grepl("_IS_", rownames(LCMS.pos.se), fixed=T),])$ruv4RC)),
+           Runorder=LCMS.pos.se$Runorder) %>%
+  mutate(type="ruv4RC") %>% 
+  gather(key="IS", value="value", -c(Runorder:type)) -> temp2
+
+temp <- rbind(temp1, temp2)
+
+ggplot(temp, aes(x=Runorder, y=value))+
+  geom_point(aes(col=type), alpha=0.3)+
+  geom_smooth(aes(group=type, lty=type), se = T, method = "lm")+
+  facet_wrap(~ IS, scale="fixed")
+
+```
+
+# Comparison
+
+## Reduction of concentration drift over time
+
+A boxplot of the slopes will reveal any reduction in the linear trend, for the ISs and the metabolites.
+
+```{r}
+time.trend.neg <- list()
+methods <- names(assays(LCMS.neg.se))
+methods <- methods[-1]
+names(methods) <- c("log2RC", "log2QNRC","log2NRC","RUV4")
+
+x <- LCMS.neg.se$Runorder
+is <- rownames(LCMS.neg.se)[grepl("_IS_", rownames(LCMS.neg.se), fixed=T)]
+for(i in 1:length(methods)){
+  time.trend.neg[[i]] <- list()
+  time.trend.neg[[i]]$slope <- apply(assays(LCMS.neg.se)[[methods[i]]], 1, function(y) coef(lm(y ~ x))["x"])
+  time.trend.neg[[i]]$intercept<- apply(assays(LCMS.neg.se)[[methods[i]]], 1, function(y) coef(lm(y ~ x))["(Intercept)"])
+  names(time.trend.neg)[i] <- names(methods)[i]
+}
+
+as.data.frame(lapply(time.trend.neg, "[[", "slope")) %>% 
+  mutate(feature=rownames(.)) %>% 
+  mutate(featureType=(ifelse(grepl("_IS_", feature, fixed=T), "IS", "metabolite"))) %>%
+  gather(key="type", value="slope", -(feature:featureType)) %>% 
+  ggplot(aes(x=type, y=slope))+
+  geom_boxplot(aes(fill=type),outlier.color = NA)+
+  geom_jitter(width=0.1, alpha=0.5)+
+  geom_hline(yintercept = 0, lty=2, col="red")+
+  scale_x_discrete(limits=names(time.trend.neg))+
+  facet_wrap(~featureType,scales = "free")
+
+as.data.frame(lapply(time.trend.neg, "[[", "intercept")) %>% 
+  mutate(feature=rownames(.)) %>% 
+  mutate(featureType=(ifelse(grepl("_IS_", feature, fixed=T), "IS", "metabolite"))) %>%
+  gather(key="type", value="intercept", -(feature:featureType)) %>% 
+  ggplot(aes(x=type, y=intercept))+
+  geom_boxplot(aes(fill=type),outlier.color = NA)+
+  geom_jitter(width=0.1, alpha=0.5)+
+  scale_x_discrete(limits=names(time.trend.neg))+
+  facet_wrap(~featureType,scales = "free")
+
+time.trend.pos <- list()
+x <- LCMS.pos.se$Runorder
+is <- rownames(LCMS.pos.se)[grepl("_IS_", rownames(LCMS.pos.se), fixed=T)]
+for(i in 1:length(methods)){
+  time.trend.pos[[i]] <- list()
+  time.trend.pos[[i]]$slope <- apply(assays(LCMS.pos.se)[[methods[i]]], 1, function(y) coef(lm(y ~ x))["x"])
+  time.trend.pos[[i]]$intercept<- apply(assays(LCMS.pos.se)[[methods[i]]], 1, function(y) coef(lm(y ~ x))["(Intercept)"])
+  names(time.trend.pos)[i] <- names(methods)[i]
+}
+
+as.data.frame(lapply(time.trend.pos, "[[", "slope")) %>% 
+  mutate(feature=rownames(.)) %>% 
+  mutate(featureType=(ifelse(grepl("_IS_", feature, fixed=T), "IS", "metabolite"))) %>%
+  gather(key="type", value="slope", -(feature:featureType)) %>% 
+  ggplot(aes(x=type, y=slope))+
+  geom_boxplot(aes(fill=type),outlier.color = NA)+
+  geom_jitter(width=0.1, alpha=0.5)+
+  geom_hline(yintercept = 0, lty=2, col="red")+
+  scale_x_discrete(limits=names(time.trend.pos))+
+  facet_wrap(~featureType,scales = "free")
+
+as.data.frame(lapply(time.trend.pos, "[[", "intercept")) %>% 
+  mutate(feature=rownames(.)) %>% 
+  mutate(featureType=(ifelse(grepl("_IS_", feature, fixed=T), "IS", "metabolite"))) %>%
+  gather(key="type", value="intercept", -(feature:featureType)) %>% 
+  ggplot(aes(x=type, y=intercept))+
+  geom_boxplot(aes(fill=type),outlier.color = NA)+
+  geom_jitter(width=0.1, alpha=0.5)+
+  scale_x_discrete(limits=names(time.trend.pos))+
+  facet_wrap(~featureType,scales = "free")
+
+
+```
+
+## Reduction of the CV
+
+The coefficient of variation should also be decreased, assuming that part of the technical variability has been removed with the normalization methods. The CV is calculated on the linear scale.
+
+```{r}
+cv.neg <- list()
+methods <- names(assays(LCMS.neg.se))
+methods <- methods[-1]
+names(methods) <- c("log2RC", "log2QNRC","log2NRC","RUV4")
+for(i in 1:length(methods)){
+  cv.neg[[i]] <- apply(assays(LCMS.neg.se)[[methods[i]]], 1, 
+                       function(y) sd(2^y)/mean(2^y))
+  names(cv.neg)[i] <- names(methods)[i]
+}
+
+as.data.frame(cv.neg) %>% 
+  mutate(feature=rownames(.)) %>% 
+  mutate(featureType=(ifelse(grepl("_IS_", feature, fixed=T), "IS", "metabolite"))) %>%
+  gather(key="type", value="cv", -(feature:featureType)) %>% 
+  ggplot(aes(x=type, y=cv))+
+  geom_boxplot(aes(fill=type))+
+  geom_jitter(width=0.1, alpha=0.5)+
+  scale_x_discrete(limits=names(cv))+
+  facet_wrap(~featureType,scales = "free")
+
+
+cv.pos <- list()
+methods <- names(assays(LCMS.pos.se))
+methods <- methods[-1]
+names(methods) <- c("log2RC", "log2QNRC","log2NRC","RUV4")
+for(i in 1:length(methods)){
+  cv.pos[[i]] <- apply(assays(LCMS.pos.se)[[methods[i]]], 1, 
+                         function(y) sd(2^y)/mean(2^y))
+  names(cv.pos)[i] <- names(methods)[i]
+}
+
+as.data.frame(cv.pos) %>% 
+  mutate(feature=rownames(.)) %>% 
+  mutate(featureType=(ifelse(grepl("_IS_", feature, fixed=T), "IS", "metabolite"))) %>%
+  gather(key="type", value="cv", -(feature:featureType)) %>% 
+  ggplot(aes(x=type, y=cv))+
+  geom_boxplot(aes(fill=type))+
+  geom_jitter(width=0.1, alpha=0.5)+
+  scale_x_discrete(limits=names(cv))+
+  facet_wrap(~featureType,scales = "free")
+
+```
+
+## Separation for selected metabolites
+
+### Steroids
+```{r}
+
+stripchart(assays(LCMS.neg.se)$log2RC["LCMS_neg_feature_79",] ~ LCMS.neg.se$Sex,
+           pch=19, vertical=T, method="jitter", ylab = "log2RC", main="androsterone sulfate",
+           col=c("black", "red"))
+
+stripchart(assays(LCMS.neg.se)$log2RC["LCMS_neg_feature_83",] ~ LCMS.neg.se$Sex,
+           pch=19, vertical=T, method="jitter", ylab = "log2RC", main="testosterone sulfate",
+           col=c("black", "red"))
+
+plot(assays(LCMS.neg.se)$log2RC["LCMS_neg_feature_79",], col=as.numeric(LCMS.neg.se$Sex), pch=19)
+plot(assays(LCMS.neg.se)$log2RC["LCMS_neg_feature_83",], col=as.numeric(LCMS.neg.se$Sex), pch=19)
+
+stripchart(assays(LCMS.pos.se)$log2RC["LCMS_pos_feature_147",] ~ LCMS.pos.se$Sex,
+           pch=19, vertical=T, method="jitter", ylab = "log2RC", main="progesterone",
+           col=c("black", "red"))
+stripchart(assays(LCMS.pos.se)$log2RC["LCMS_pos_feature_148",] ~ LCMS.pos.se$Sex,
+           pch=19, vertical=T, method="jitter", ylab = "log2RC", main="testosterone",
+           col=c("black", "red"))
+
+plot(assays(LCMS.pos.se)$log2RC["LCMS_pos_feature_147",], col=as.numeric(LCMS.pos.se$Sex), pch=19)
+plot(assays(LCMS.pos.se)$log2RC["LCMS_pos_feature_148",], col=as.numeric(LCMS.pos.se$Sex), pch=19)
+
+
+methods <- names(assays(LCMS.neg.se))
+methods <- methods[-1]
+names(methods) <- c("log2RC", "log2QNRC","log2NRC","RUV4")
+
+for(i in 1:length(methods)){
+assays(LCMS.neg.se)[[methods[i]]][c("LCMS_neg_feature_79","LCMS_neg_feature_83"),] %>%
+  as.data.frame() %>%
+  mutate(feature=rownames(.)) %>% 
+  gather(key="ID", value = !!methods[i], -feature) -> feat.select.neg
+
+feat.select.neg$sex <- pData$Sex[match(feat.select.neg$ID, pData$ID)]
+feat.select.neg$name <- rowData(LCMS.neg.se[feat.select.neg$feature,])$Metabolite.name
+
+ggplot(feat.select.neg, aes_string(x="sex", y=methods[i]))+
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter(aes(col=sex), alpha=0.2 ) +
+  facet_wrap(~name, scales = "free_y" ) -> p
+
+print(p)
+
+feat.select.neg %>% 
+  group_by(name) %>%
+  do(broom::tidy(t.test(get(methods[i])~sex, data=.))) -> t
+
+print(t)
+
+}
+
+
+for(i in 1:length(methods)){
+assays(LCMS.pos.se)[[methods[i]]][c("LCMS_pos_feature_147","LCMS_pos_feature_148"),] %>%
+  as.data.frame() %>%
+  mutate(feature=rownames(.)) %>% 
+  gather(key="ID", value = !!methods[i], -feature) -> feat.select.pos
+
+feat.select.pos$sex <- pData$Sex[match(feat.select.pos$ID, pData$ID)]
+feat.select.pos$name <- rowData(LCMS.pos.se[feat.select.pos$feature,])$Metabolite.name
+
+ggplot(feat.select.pos, aes_string(x="sex", y=methods[i]))+
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter(aes(col=sex), alpha=0.2 ) +
+  facet_wrap(~name, scales = "free_y" ) -> p
+
+print(p)
+
+feat.select.pos %>% 
+  group_by(name) %>%
+  do(broom::tidy(t.test(get(methods[i])~sex, data=.))) -> t
+
+print(t)
+
+}
+
+```
+
+### Aminoacids associated with sex
+
+```{r}
+aa.select <- read.table("/home/francesco.marabita/Projects/DHR/data/Metabolomics/AA_sex_assoc.txt", header=T, sep="\t")
+
+feat.select <- rownames(LCMS.pos.se)[rowData(LCMS.pos.se)$Metabolite.name %in% aa.select$Name]
+
+methods <- names(assays(LCMS.pos.se))
+methods <- methods[-1]
+names(methods) <- c("log2RC", "log2QNRC","log2NRC","RUV4")
+
+for(i in 1:length(methods)){
+assays(LCMS.pos.se)[[methods[i]]][feat.select,] %>%
+  as.data.frame() %>%
+  mutate(feature=rownames(.)) %>% 
+  gather(key="ID", value = !!methods[i], -feature) -> feat.select.l
+
+feat.select.l$sex <- pData$Sex[match(feat.select.l$ID, pData$ID)]
+feat.select.l$name <- rowData(LCMS.pos.se[feat.select.l$feature,])$Metabolite.name
+
+ggplot(feat.select.l, aes_string(x="sex", y=methods[i]))+
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter(aes(col=sex), alpha=0.2 ) +
+  facet_wrap(~name, scales = "free_y" ) -> p
+
+print(p)
+
+feat.select.l %>% 
+  group_by(name) %>%
+  do(broom::tidy(t.test(get(methods[i])~sex, data=.))) -> t
+
+print(t)
+
+}
+
+```
+
+# Clustering for combined dataset
+
+```{r}
+m1 <- as.data.frame(assays(LCMS.neg.se)$ruv4RC)
+m1$feature.ID <- rownames(LCMS.neg.se)
+m2 <- as.data.frame(assays(LCMS.pos.se)$ruv4RC)
+m2$feature.ID <- rownames(LCMS.pos.se)
+
+LCMS.neg.pos <- merge(m1, m2, all=T, sort=F)
+rownames(LCMS.neg.pos) <- LCMS.neg.pos$feature.ID
+LCMS.neg.pos <- LCMS.neg.pos[, !colnames(LCMS.neg.pos) %in% "feature.ID"]
+
+
+pData.neg.pos <- pData[match(colnames(LCMS.neg.pos), pData$ID),]
+fData.neg.pos_ <- rbind(fData.neg, fData.pos)
+fData.neg.pos <- fData.neg.pos_[match(rownames(LCMS.neg.pos), fData.neg.pos_$feature.ID),]
+rm(fData.neg.pos_)
+
+LCMS.neg.pos.se <- SummarizedExperiment(assays = list(ruv4RC=as.matrix(LCMS.neg.pos)))
+if(all(rownames(LCMS.neg.pos.se)==rownames(fData.neg.pos)) & all(colnames(LCMS.neg.pos.se)==rownames(pData.neg.pos))) {
+  rowData(LCMS.neg.pos.se) <- DataFrame(fData.neg.pos)
+  colData(LCMS.neg.pos.se) <- DataFrame(pData.neg.pos)
+} else { stop("Order is different") }
+
+```
+
+```{r}
+temp.se <- LCMS.neg.pos.se[,colSums(is.na(assays(LCMS.neg.pos.se)$ruv4RC))==0]
+temp <- t(assays(temp.se)$ruv4RC) 
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = temp.se$Runorder,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = temp.se$Runorder,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             cocol.ind = temp.se$Runorder,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(temp, center=T, scale.=F)$x[,1],
+                y=prcomp(temp, center=T, scale.=F)$x[,2],
+                col= temp.se$Runorder),
+            label=temp.se$IID)
+fviz_pca_ind(prcomp(temp, center=T, scale.=F),
+             col.ind = temp.se$Sex, axes = c(1,2),
+             geom.ind = "point", mean.point=F, pointshape=19)
+
+```
+
+```{r}
+# save(LCMS.neg.se, LCMS.pos.se, file="/home/francesco.marabita/Projects/DHR/data/Metabolomics/out/LCMS/DHR_LCMS_se_v03.RData")
+# save.image(file="/home/francesco.marabita/Projects/DHR/data/Metabolomics/out/LCMS/DHR_LCMS_v03.RData")
+```
+

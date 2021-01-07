@@ -1,0 +1,619 @@
+---
+title: "DHR GCMS v02"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+Require all the libraries
+```{r}
+require(SummarizedExperiment)
+require(tidyverse)
+require(openxlsx)
+require(plotly)
+require(limma)
+require(geneplotter)
+require(factoextra)
+require(impute)
+require(sva)
+require(ruv)
+require(corrplot)
+require(RColorBrewer)
+require(ICC)
+```
+
+# Read the data
+
+Read the data and store as SummarizedEzxperiment
+
+```{r}
+outDir <- "/home/francesco.marabita/Projects/DHR/data/Metabolomics/out"
+
+# read data
+assayData <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Metabolomics/All_GCMS_2018-11-06.xlsx",
+                       sheet = "assayData", colNames =T, rowNames = T, skipEmptyRows=T)
+fData <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Metabolomics/All_GCMS_2018-11-06.xlsx",
+                       sheet = "fData", colNames =T, rowNames = F, skipEmptyRows=T)
+rownames(fData) <- fData$feature.ID
+pData_ <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Metabolomics/All_GCMS_2018-11-06.xlsx",
+                       sheet = "pData", colNames =T, rowNames = F, skipEmptyRows=T)
+
+# include only subjects present in clin.data
+load("/home/francesco.marabita/Projects/DHR/data/Clinical/Clin_data_2018-02-13.RData")
+
+tmp <- as.data.frame(clin.data[, c("ID", "visit_id", "VISITnumber", "dateofbirth", "Age", "Visit", "Visittime", "Sex")])
+colnames(tmp) <- c("IID", "ID", "Visit.number", "Birth.date", "Age", "Visit.date", "Visit.time", "Sex")
+pData <- merge(pData_, tmp, by=c("ID", "IID", "Visit.number"), all.x=T, sort=F)
+
+pData <- pData[match(pData_$ID, pData$ID),]
+rownames(pData) <- pData$ID
+
+
+# create SummarizedExperiment
+
+GCMS.se <- SummarizedExperiment(assays = list(RC=as.matrix(assayData)))
+
+if(all(rownames(GCMS.se)==rownames(fData))) {
+  rowData(GCMS.se) <- DataFrame(fData)
+} else { stop("Order is different") }
+
+if(all(colnames(GCMS.se)==rownames(pData))) {
+  colData(GCMS.se) <- DataFrame(pData)
+} else { stop("Order is different") }
+
+# include only subjects present in clin.data
+
+GCMS.se <- GCMS.se[,GCMS.se$IID %in% unique(clin.data$ID)]
+
+```
+
+Check missing values
+
+```{r}
+plot(GCMS.se$Exp.Time.Difference.minutes, colSums(assays(GCMS.se)$RC==0)/nrow(GCMS.se),
+     main="Fraction of NAs per sample", xlab="Run order", ylab="Fraction of NAs")
+
+barplot(rowSums(assays(GCMS.se)$RC==0)/ncol(GCMS.se),
+         main="Fraction of NAs per feature")
+```
+
+Convert the Relative Concentration (RC) values top log2(RC) and impute the NAs with KNN.
+
+```{r}
+assays(GCMS.se)$log2RC <- log2(assays(GCMS.se)$RC)
+assays(GCMS.se)$log2RC[!is.finite(assays(GCMS.se)$log2RC)] <- NA
+assays(GCMS.se)$log2RC <- impute.knn(assays(GCMS.se)$log2RC)$data
+```
+
+# Quality control
+In order to check for sample-to-sample relationship, outliers and batch effects, I consider the following:
+
+* Density plot
+* Boxpots
+* PCA
+* Pairwise scatterplots
+
+```{r}
+multidensity(assays(GCMS.se)$log2RC, legend = F, main="Raw",
+             xlab="Relative concentration", xlim=c(0,40))
+```
+
+```{r  fig.height=20}
+temp.l <- as.data.frame(assays(GCMS.se)$log2RC) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "log2RC", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=log2RC))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("Relative concentration")+
+  theme(legend.position="none")
+```
+
+A few samples seems to have higher concentration than average.
+
+```{r eval=F}
+for(i in 1:length(unique(GCMS.se$IID))){
+  lumi::pairs(ExpressionSet(assays(GCMS.se)$log2RC[, GCMS.se$IID %in% unique(GCMS.se$IID)[i]]),
+              main=unique(GCMS.se$IID)[i])
+}
+
+```
+
+Finally, I make a PCA plot, coloring by the runorder time in minute (`Exp.Time.Difference.minutes`) or the experimental batch (`Analytical.Batch`)
+
+```{r}
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2RC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2RC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2RC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(t(assays(GCMS.se)$log2RC))$x[,1],
+                y=prcomp(t(assays(GCMS.se)$log2RC))$x[,2],
+                col = GCMS.se$Exp.Time.Difference.minutes),
+            label=GCMS.se$ID)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2RC), center=T, scale.=F),
+             col.ind = GCMS.se$Analytical.Batch,
+             geom.ind = "point", mean.point=F, pointshape=19,
+             palette = "RdYlBu")
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2RC), center=T, scale.=F),
+             col.ind = GCMS.se$Sex.y,axes = c(6,7),
+             geom.ind = "point", mean.point=F, pointshape=19)
+```
+
+The data show that the effect of runorder effect must be removed.
+
+# Normalization
+I will first normalize the data wiuth Quantile Normalization (QN) or median scaling. I do not expet these method to do any obvious removal of the runorder effect, unless this is correlated with the overall signal.
+
+## Quantile Normalization
+```{r}
+assays(GCMS.se)$log2QNRC <- normalizeQuantiles(assays(GCMS.se)$log2RC)
+```
+
+
+```{r}
+multidensity(assays(GCMS.se)$log2QNRC, legend = F, main="Quantile Norm",
+             xlab="Relative concentration", xlim=c(0,40))
+
+```
+
+The densities show the effect of the QN, which assume that the quantiles of the distributions are the same.
+```{r  fig.height=20}
+temp.l <- as.data.frame(assays(GCMS.se)$log2QNRC) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "log2QNRC", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=log2QNRC))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("Relative concentration")+
+  theme(legend.position="none")
+```
+
+```{r eval=F}
+for(i in 1:length(unique(GCMS.se$IID))){
+  lumi::pairs(ExpressionSet(assays(GCMS.se)$log2QNRC[, GCMS.se$IID %in% unique(GCMS.se$IID)[i]]),
+              main=unique(GCMS.se$IID)[i])
+
+```
+
+The PCA finally shows that the runorder effect in not removed as expected
+```{r}
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2QNRC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2QNRC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2QNRC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(t(assays(GCMS.se)$log2QNRC))$x[,1],
+                y=prcomp(t(assays(GCMS.se)$log2QNRC))$x[,2],
+                col = GCMS.se$Exp.Time.Difference.minutes),
+            label=GCMS.se$Sample.name)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2QNRC), center=T, scale.=F),
+             col.ind = GCMS.se$Analytical.Batch,
+             geom.ind = "point", mean.point=F, pointshape=19,
+             palette = "RdYlBu")
+```
+
+
+## Median scaling
+Similarly to QN, I do not expect that scaling the columns to have the same median will eliminated the runorder effect.
+```{r}
+assays(GCMS.se)$log2NRC <- normalizeBetweenArrays(assays(GCMS.se)$log2RC, method = "scale")
+```
+
+```{r}
+multidensity(assays(GCMS.se)$log2NRC, legend = F, main="Median Scale",
+             xlab="Relative concentration", xlim=c(0,40))
+
+```
+
+```{r fig.height=20}
+temp.l <- as.data.frame(assays(GCMS.se)$log2NRC) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "log2NRC", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=log2NRC))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("Relative concentration")+
+  theme(legend.position="none")
+```
+
+
+```{r eval=F}
+for(i in 1:length(unique(GCMS.se$IID))){
+  lumi::pairs(ExpressionSet(assays(GCMS.se)$log2NRC[, GCMS.se$IID %in% unique(GCMS.se$IID)[i]]),
+              main=unique(GCMS.se$IID)[i])
+}
+```
+
+In fact, the runorde effect is still present.
+```{r}
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2NRC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2NRC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2NRC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(t(assays(GCMS.se)$log2NRC))$x[,1],
+                y=prcomp(t(assays(GCMS.se)$log2NRC))$x[,2],
+                col = GCMS.se$Exp.Time.Difference.minutes),
+            label=GCMS.se$Sample.name)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$log2NRC), center=T, scale.=F),
+             col.ind = GCMS.se$Analytical.Batch,
+             geom.ind = "point", mean.point=F, pointshape=19,
+             palette = "RdYlBu")
+
+```
+
+
+## ComBat
+Batch-removal techniques should remove the vairation that is introduced experimentally during the analylsis. I will first try ComBat and the `Analytical.Batch` as an indicator of the batch effect. In fact, this varible is correlated to the runorder.
+```{r}
+ggplot(as.data.frame(colData(GCMS.se)), aes(x=Analytical.Batch, y=Exp.Time.Difference.minutes))+
+  geom_boxplot(aes(fill=Analytical.Batch))
+```
+```{r}
+batch <- GCMS.se$Analytical.Batch
+modcombat <- model.matrix(~ 1, data=colData(GCMS.se))
+assays(GCMS.se)$combatRC <- ComBat(dat=assays(GCMS.se)$log2RC, batch=batch, mod=modcombat)
+```
+
+
+```{r}
+multidensity(assays(GCMS.se)$combatRC, legend = F, main="ComBat",
+             xlab="Relative concentration", xlim=c(0,40))
+```
+
+A few samples appear to be still outliers and not properly normalized.
+
+```{r fig.height=20}
+temp.l <- as.data.frame(assays(GCMS.se)$combatRC) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "combatRC", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=combatRC))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("Relative concentration")+
+  theme(legend.position="none")
+```
+
+```{r eval=F}
+for(i in 1:length(unique(GCMS.se$IID))){
+  lumi::pairs(ExpressionSet(assays(GCMS.se)$combatRC[, GCMS.se$IID %in% unique(GCMS.se$IID)[i]]),
+              main=unique(GCMS.se$IID)[i])
+```
+
+Finally, PCA will reveal that the batch effect has been dramatically reduced.
+```{r}
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$combatRC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$combatRC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$combatRC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(t(assays(GCMS.se)$combatRC))$x[,1],
+                y=prcomp(t(assays(GCMS.se)$combatRC))$x[,2],
+                col = GCMS.se$Exp.Time.Difference.minutes),
+            label=GCMS.se$Sample.name)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$combatRC), center=T, scale.=F),
+             col.ind = GCMS.se$Analytical.Batch,
+             geom.ind = "point", mean.point=F, pointshape=19,
+             palette = "RdYlBu")
+
+```
+
+However, the same outliers appears.
+
+## RUV4
+Finally I will try RUV4, and using the Internal Standards (ISs) as negative control metabolites, with the assumption that they are not influenced by biological variation, but any observed variability in the IS is enitirelly introduced byt the epxerimental steps. The method requires the coiche of an optimal number of K, which is not trivial. RUV4 however is less sensitive to the number of Ks as compared to RUV2. I will evaluate the correlation of the unobserved covariates W with the control genes, as well as the distribution of the relative concentrations. The method requires to specify a design matrix, and for this purpose I use the individual (`IID`) and the visit numer (`Visit.number`) as covariate. I first get a rough estimation of the Ks with the "leave1out" method.
+
+```{r}
+numk <- getK(Y = t(assays(GCMS.se)$log2RC) ,
+             X = cbind(GCMS.se$IID, as.factor(GCMS.se$Visit.number)),
+             ctl = grepl("_IS_", rownames(GCMS.se), fixed=T),
+             method = "leave1out")
+
+numk$k
+```
+
+The number of estimate components is 6. As I have only 12 control metabolites, this number seems too high. I will use k=4 (1/3 of the control features)
+
+```{r}
+fit <-  RUV4(Y = t(assays(GCMS.se)$log2RC),
+             X = cbind(GCMS.se$IID, as.factor(GCMS.se$Visit.number)),
+             ctl = grepl("_IS_", rownames(GCMS.se), fixed=T),
+             k=4)
+```
+
+The normalized conncentrations are then obtained by removing the effect of the W components. From the RUV4 documentation, `W`	represent the estimated unwanted factors and `alpha`is the estimated coefficients of `W`.
+
+```{r}
+assays(GCMS.se)$ruv4RC <- t(t(assays(GCMS.se)$log2RC) - fit$W %*% fit$alpha)
+```
+
+```{r}
+multidensity(assays(GCMS.se)$ruv4RC, legend = F, main="RUV4",
+             xlab="Relative concentration", xlim=c(0,40))
+
+```
+
+The densities appear to be properly normalized and also the outlier samples seem to be properly scaled.
+```{r fig.height=20}
+temp.l <- as.data.frame(assays(GCMS.se)$ruv4RC) %>% 
+  mutate(feature=rownames(.)) %>% 
+  gather(key =  "ID", value = "ruv4RC", -feature)
+
+p <- ggplot(temp.l, aes(x=ID, y=ruv4RC))
+p + geom_boxplot(aes(fill=ID))+ 
+  coord_flip()+
+  ggtitle("Relative concentration")+
+  theme(legend.position="none")
+
+```
+
+The boxplots show also good between-sample normalization.
+
+```{r eval=F}
+for(i in 1:length(unique(GCMS.se$IID))){
+  lumi::pairs(ExpressionSet(assays(GCMS.se)$ruv4RC[, GCMS.se$IID %in% unique(GCMS.se$IID)[i]]),
+              main=unique(GCMS.se$IID)[i])
+}
+
+```
+
+Finally PCA reveals that the effect due to the runorder is completely removed.
+
+```{r}
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$ruv4RC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point", mean.point=F)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$ruv4RC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = c("point", "text"))
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$ruv4RC), center=T, scale.=F),
+             col.ind = GCMS.se$Exp.Time.Difference.minutes,
+             geom.ind = "point")+
+  geom_text(aes(x=prcomp(t(assays(GCMS.se)$ruv4RC))$x[,1],
+                y=prcomp(t(assays(GCMS.se)$ruv4RC))$x[,2],
+                col = GCMS.se$Exp.Time.Difference.minutes),
+            label=GCMS.se$IID)
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$ruv4RC), center=T, scale.=F),
+             col.ind = GCMS.se$Analytical.Batch,
+             geom.ind = "point", mean.point=F, pointshape=19,
+             palette = "RdYlBu")
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$ruv4RC), center=T, scale.=F),
+             col.ind = GCMS.se$Sex.y, axes = c(3,4),
+             geom.ind = "point", mean.point=F, pointshape=19)
+
+
+```
+
+The PCA plot also shows that after RUV4 samples belonging to the same individual (different visits) cluster together at the margin of the sample cloud.
+```{r}
+fviz_pca_ind(prcomp(t(assays(GCMS.se)$ruv4RC), center=T, scale.=F),
+             col.ind = as.numeric(as.factor(GCMS.se$IID)),
+             geom.ind = "point", mean.point=F, pointshape=19,
+             palette = "RdYlBu") +
+  scale_color_continuous()
+```
+
+The first PC now explain 43% of the variability
+
+### Correlation between W and IS
+I will investigate now the correlation between the columns of W and the raw log2RC of the ISs. 
+```{r}
+temp <- cor(cbind(t(assays(GCMS.se[grepl("_IS_", rownames(GCMS.se), fixed=T),])$log2RC), as.data.frame(fit$W)))
+temp2 <- cor.mtest(cbind(t(assays(GCMS.se[grepl("_IS_", rownames(GCMS.se), fixed=T),])$log2RC), as.data.frame(fit$W)))
+
+corrplot.mixed(temp, p.mat = temp2$p,
+         upper="ellipse", lower="number",
+         upper.col=colorRampPalette(rev(brewer.pal(7,"RdBu")))(100),
+         lower.col=colorRampPalette(rev(brewer.pal(7,"RdBu")))(100),
+         tl.pos="lt", tl.cex = 0.5, 
+         sig.level = 0.05, number.cex=0.5)
+corrplot(temp, p.mat = temp2$p,
+         method="ellipse", type = "lower",
+         col=colorRampPalette(rev(brewer.pal(7,"RdBu")))(100),
+         tl.pos="ld", tl.cex = 0.5, 
+         sig.level = 0.05, number.cex=0.5)
+```
+
+The first unkown factor, appears strongly and positively correlated with the IS_0 (METHYL STEARATE), IS_1 (CHOLESTEROL-D7-TMS RI 3136) and IS_2 (SUCROSE-13C12-8TMS RI 2624). Similarly the fourth  unkown factor is posively correlated with many IS_7s. Since there is a drift for IS_0 over time, I suspect that at least the first fasctor will account for the runorder effect and the signal drift. 
+
+```{r}
+data.frame(Batch=GCMS.se$Analytical.Batch, as.data.frame(fit$W)) %>%
+  gather(key = "W", value="value", -Batch) %>% 
+  ggplot(aes(x=Batch, y=value))+
+  geom_boxplot(aes(fill=Batch))+
+  facet_wrap(~ W, scales="free")
+
+data.frame(Batch=GCMS.se$Analytical.Batch, Exp.Time.Diff=GCMS.se$Exp.Time.Difference.minutes, as.data.frame(fit$W)) %>%
+  gather(key = "W", value="value", -(Batch:Exp.Time.Diff)) %>% 
+  ggplot(aes(x=Exp.Time.Diff, y=value))+
+  geom_point(aes(col=Batch))+
+  facet_wrap(~ W, scales="free")
+
+```
+ 
+
+The V3 factor is interesting and appears to be correlated maybe to daily fluctuations? One group correspond approximately to a 24h cycle.
+
+Finally, I will give a look at the raw and nomralized concentration for the IS.
+```{r}
+data.frame(as.data.frame(t(assays(GCMS.se[grepl("_IS_", rownames(GCMS.se), fixed=T),])$log2RC)),
+           Batch=GCMS.se$Analytical.Batch,
+           Exp.Time.Diff=GCMS.se$Exp.Time.Difference.minutes) %>%
+  mutate(type="log2RC") %>% 
+  gather(key="IS", value="value", -(Batch:type))-> temp1
+
+data.frame(as.data.frame(t(assays(GCMS.se[grepl("_IS_", rownames(GCMS.se), fixed=T),])$ruv4RC)),
+           Batch=GCMS.se$Analytical.Batch,
+           Exp.Time.Diff=GCMS.se$Exp.Time.Difference.minutes) %>%
+  mutate(type="ruv4RC") %>% 
+  gather(key="IS", value="value", -(Batch:type)) -> temp2
+
+temp <- rbind(temp1, temp2)
+
+ggplot(temp, aes(x=Exp.Time.Diff, y=value))+
+  geom_point(aes(col=type), alpha=0.3)+
+  geom_smooth(aes(group=type, lty=type), se = T, method = "lm")+
+  facet_wrap(~ IS, scale="free_y")
+```
+
+
+# Comparison
+
+## Reduction of concentration drift over time
+
+I will check for the presence of the runorder effect, by fitting a linear model to the concentration of the different ISs in relation to the runorder (`Exp.Time.Difference.minutes`)
+```{r}
+time.trend <- list()
+methods <- names(assays(GCMS.se))
+methods <- methods[-1]
+names(methods) <- c("log2RC", "QN", "MedianScale", "ComBat", "RUV4")
+x <- GCMS.se$Exp.Time.Difference.minutes
+is <- rownames(GCMS.se)[grepl("_IS_", rownames(GCMS.se), fixed=T)]
+for(i in 1:length(methods)){
+  time.trend[[i]] <- list()
+  time.trend[[i]]$slope <- apply(assays(GCMS.se)[[methods[i]]], 1, function(y) coef(lm(y ~ x))["x"])
+  time.trend[[i]]$intercept<- apply(assays(GCMS.se)[[methods[i]]], 1, function(y) coef(lm(y ~ x))["(Intercept)"])
+  names(time.trend)[i] <- names(methods)[i]
+}
+```
+
+A boxplot of the slopes will reveal any reduction in the linear trend, for the ISs and the metabolites.
+```{r}
+as.data.frame(lapply(time.trend, "[[", "slope")) %>% 
+  mutate(feature=rownames(.)) %>% 
+  mutate(featureType=(ifelse(grepl("_IS_", feature, fixed=T), "IS", "metabolite"))) %>%
+  gather(key="type", value="slope", -(feature:featureType)) %>% 
+  ggplot(aes(x=type, y=slope))+
+  geom_boxplot(aes(fill=type),outlier.color = NA)+
+  geom_jitter(width=0.1, alpha=0.5)+
+  geom_hline(yintercept = 0, lty=2, col="red")+
+  scale_x_discrete(limits=names(time.trend))+
+  facet_wrap(~featureType,scales = "free")
+
+as.data.frame(lapply(time.trend, "[[", "intercept")) %>% 
+  mutate(feature=rownames(.)) %>% 
+  mutate(featureType=(ifelse(grepl("_IS_", feature, fixed=T), "IS", "metabolite"))) %>%
+  gather(key="type", value="intercept", -(feature:featureType)) %>% 
+  ggplot(aes(x=type, y=intercept))+
+  geom_boxplot(aes(fill=type),outlier.color = NA)+
+  geom_jitter(width=0.1, alpha=0.5)+
+  scale_x_discrete(limits=names(time.trend))+
+  facet_wrap(~featureType,scales = "free")
+
+```
+
+In comparison to the raw data, ComBat and RUV4 have reduced the effect of the time drift.
+
+
+## Reduction of the CV
+The coefficient of variation should also be decreased, assuming that part of the technical variability has been removed with the normalization methods. The CV is calculated on the linear scale
+```{r}
+cv<- list()
+methods <- names(assays(GCMS.se))
+methods <- methods[-1]
+names(methods) <- c("log2RC", "QN", "MedianScale", "ComBat", "RUV4")
+for(i in 1:length(methods)){
+  cv[[i]] <- apply(assays(GCMS.se)[[methods[i]]], 1, 
+                         function(y) sd(2^y)/mean(2^y))
+  names(cv)[i] <- names(methods)[i]
+}
+
+as.data.frame(cv) %>% 
+  mutate(feature=rownames(.)) %>% 
+  mutate(featureType=(ifelse(grepl("_IS_", feature, fixed=T), "IS", "metabolite"))) %>%
+  gather(key="type", value="cv", -(feature:featureType)) %>% 
+  ggplot(aes(x=type, y=cv))+
+  geom_boxplot(aes(fill=type))+
+  geom_jitter(width=0.1, alpha=0.5)+
+  scale_x_discrete(limits=names(cv))+
+  facet_wrap(~featureType,scales = "free")
+
+```
+
+RUV4 has reduced the CV both for the ISs and the metabolites.
+## ICC
+
+Calculate Intraclass Correlation Coefficient (ICC) to score the normalization methods. In principle, samples belonging to the same subject should be more similar to each other.
+
+```{r, message=F, warning=F}
+ICC.m <- matrix(nrow=nrow(GCMS.se), ncol = 5,
+                dimnames = list(rownames(GCMS.se),  c("log2RC", "QN", "MedianScale", "ComBat", "RUV4")))
+for(i in 1:nrow(GCMS.se)){
+  trash <- capture.output(ICC.m[i,1] <- ICCbare(IID,log2RC, data=data.frame(IID=GCMS.se$IID,
+                                                                           log2RC=assays(GCMS.se)$log2RC[i,])))
+  trash <- capture.output(ICC.m[i,2] <- ICCbare(IID,QN, data=data.frame(IID=GCMS.se$IID,
+                                                                       QN=assays(GCMS.se)$log2QNRC[i,])))
+  trash <- capture.output(ICC.m[i,3] <- ICCbare(IID,MedianScale, data=data.frame(IID=GCMS.se$IID,
+                                                                                MedianScale=assays(GCMS.se)$log2NRC[i,])))
+  trash <- capture.output(ICC.m[i,4] <- ICCbare(IID,ComBat, data=data.frame(IID=GCMS.se$IID,
+                                                                           ComBat=assays(GCMS.se)$combatRC[i,])))
+  trash <- capture.output(ICC.m[i,5] <- ICCbare(IID,RUV4, data=data.frame(IID=GCMS.se$IID,
+                                                                         RUV4=assays(GCMS.se)$ruv4RC[i,])))
+  
+}
+
+boxplot(ICC.m)
+
+as.data.frame(colMeans(ICC.m))
+
+as.data.frame(colQuantiles(ICC.m))
+
+comb2 <- combn(colnames(ICC.m), 2)
+for(i in 1:ncol(comb2)){
+  print(paste0(comb2[1,i], " - ", comb2[2,i]))
+  print(wilcox.test(ICC.m[,comb2[1,i]], ICC.m[,comb2[2,i]]))
+}
+```
+
+## Correlation to clinical lab tests
+
+For cholesterol (GCMS_feature_128) and glucose (GCMS_feature_80), I aslo have the measurements obtained from the clinical lab tests. I will check if normalization methods improve the correlation.
+
+```{r}
+cor.m <- matrix(nrow=2, ncol = length(names(assays(GCMS.se))), 
+                dimnames = list(c("cholesterol", "glucose"),  names(assays(GCMS.se))))
+
+for(i in 1:ncol(cor.m)){
+  temp.x <- t(assays(GCMS.se)[[i]][c("GCMS_feature_128","GCMS_feature_80"),])
+  temp.y <- as.matrix(clin.data[,c("fPKol", "fPGluk")])
+  rownames(temp.y) <- clin.data$visit_id
+  temp <- merge(temp.x, temp.y, all.x=T, by="row.names")
+  cor.m[1,i] <- cor(temp$GCMS_feature_128, temp$fPKol)
+  cor.m[2,i] <- cor(temp$GCMS_feature_80, temp$fPGluk)
+  print(qplot(GCMS_feature_128, fPKol, data = temp, main=names(assays(GCMS.se))[i], geom = c("point","smooth"), method = "lm"))
+  print(qplot(GCMS_feature_80, fPGluk, data = temp, main=names(assays(GCMS.se))[i], geom = c("point","smooth"), method = "lm"))
+}
+
+
+as.data.frame(cor.m)
+```
+
+```{r}
+# save(GCMS.se, file="/home/francesco.marabita/Projects/DHR/data/Metabolomics/out/DHR_GCMS_se_v02.RData")
+# save.image(file="/home/francesco.marabita/Projects/DHR/data/Metabolomics/out/DHR_GCMS_v02.RData")
+```

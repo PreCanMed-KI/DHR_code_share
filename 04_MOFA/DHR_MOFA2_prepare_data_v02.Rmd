@@ -1,0 +1,207 @@
+---
+title: "DHR MOFA2 prepare the data v02"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 9
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+Require all the libraries first
+```{r message=F}
+require(MultiAssayExperiment)
+require(SummarizedExperiment)
+require(MOFA2)
+require(RColorBrewer)
+require(tidyverse)
+```
+
+# Load the data
+
+```{r}
+load("/home/francesco.marabita/Projects/DHR/data/MultiAssayExp/out/DHR_MAexp_v05.RData")
+outDir <-  "/home/francesco.marabita/Projects/DHR/out/MOFA2_v02"
+dir.create(outDir)
+```
+
+# Create MOFA object
+
+For this analyis I will consider the Autoantibody measurements as a binary feature. Therefore I will consider the "Binary" assay.
+
+```{r}
+tmp <- assays(MAexp[["autoab"]])$Binary
+tmp <- tmp[rownames(tmp) %in% rownames(MAexp.clean[["autoab"]]),]
+if(all(rownames(tmp)==rownames(MAexp.clean[["autoab"]]))) {
+  assays(MAexp.clean[["autoab"]]) <- list("Binary" = tmp)
+} else {message("Rownames are different")}
+
+```
+
+I will remove the feature with zero variance and the clinical data.
+
+```{r}
+MAexp.clean <- MAexp.clean[,,!names(MAexp.clean) %in% "clinical"]
+
+keep.col <- intersect(intersect(intersect(colnames(assay(MAexp.clean[["GCMS"]])), colnames(assay(MAexp.clean[["autoab"]]))), colnames(assay(MAexp.clean[["LCMS.pos"]]))), colnames(assay(MAexp.clean[["microb.16S"]])))
+
+for (i in 1:length(experiments(MAexp.clean))){
+  experiments(MAexp.clean)[[i]] <- experiments(MAexp.clean)[[i]][,colnames(MAexp.clean[[i]]) %in% keep.col]
+  experiments(MAexp.clean)[[i]] <- experiments(MAexp.clean)[[i]][apply(assay(MAexp.clean[[i]]), 1, function(x) var(x,na.rm = T) != 0), ]
+}
+```
+
+# Create MOFA object
+
+A data frame with columns "sample","feature","view","group","value" needs to be created and saved as text files.
+
+```{r}
+assay(MAexp.clean[["GCMS"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".GCMS")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="GCMS",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> gcms.df
+
+assay(MAexp.clean[["LCMS.neg"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".LCMS.neg")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="LCMS.neg",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> lcms.neg.df
+
+assay(MAexp.clean[["LCMS.pos"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".LCMS.pos")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="LCMS.pos",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> lcms.pos.df
+
+assay(MAexp.clean[["autoab"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".autoab")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="Autoantibodies",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> autoab.df
+
+assay(MAexp.clean[["prot.1"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".prot.1")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="PEA",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> prot.1.df
+
+assay(MAexp.clean[["prot.2"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".prot.2")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="PEA",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> prot.2.df
+
+assay(MAexp.clean[["prot.3"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".prot.3")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="PEA",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> prot.3.df
+
+assay(MAexp.clean[["prot.4"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".prot.4")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="PEA",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> prot.4.df
+
+assay(MAexp.clean[["prot.5"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".prot.5")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="PEA",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> prot.5.df
+
+assay(MAexp.clean[["prot.6"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".prot.6")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="PEA",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> prot.6.df
+
+assay(MAexp.clean[["microb.16S"]]) %>%
+  as.data.frame() %>% 
+  rownames_to_column("feature.ID") %>%
+  mutate(feature = paste0(feature.ID, ".microb.16S")) %>% 
+  gather(key="sample", value = "value", -c(feature, feature.ID)) %>% 
+  mutate(view="microb.16S",
+         group="DHR") %>% 
+  select(sample, feature, view, group, value) -> microb.16S.df
+
+mofa.input.df <- rbind(gcms.df,
+                       lcms.neg.df,
+                       lcms.pos.df,
+                       autoab.df,
+                       prot.1.df, prot.2.df, prot.3.df, prot.4.df, prot.5.df, prot.6.df,
+                       microb.16S.df)
+
+```
+
+Create annotation data frame.
+
+```{r}
+# metabolite category
+load("/home/francesco.marabita/Projects/DHR/ext_data/hmdb_selected_fields.RData")
+hmdb.df$category <- ifelse(hmdb.df$sub.class=="", hmdb.df$class, hmdb.df$sub.class)
+tmp <- annot.df[, c("featureID", "HMDB.ID.1")]
+tmp <- tmp[!is.na(tmp$HMDB.ID.1),]
+tmp$HMDB.ID.new <- sub("HMDB", "HMDB00", tmp$HMDB.ID.1)
+tmp$metab.category <- hmdb.df$category[match(tmp$HMDB.ID.new, hmdb.df$accession)]
+
+
+mofa.annot <- data.frame(feature = unique(mofa.input.df$feature), stringsAsFactors = F)
+mofa.annot$feature.ID <- mofa.annot$feature
+
+mofa.annot$feature.ID <- sub("\\.GCMS$","", mofa.annot$feature.ID)
+mofa.annot$feature.ID <- sub("\\.LCMS\\.neg$","", mofa.annot$feature.ID)
+mofa.annot$feature.ID <- sub("\\.LCMS\\.pos$","", mofa.annot$feature.ID)
+mofa.annot$feature.ID <- sub("\\.autoab$","", mofa.annot$feature.ID)
+mofa.annot$feature.ID <- sub("\\.prot\\..+$","", mofa.annot$feature.ID)
+mofa.annot$feature.ID <- sub("\\.microb\\.16S$","", mofa.annot$feature.ID)
+
+mofa.annot %>% 
+  left_join(annot.df, by=c("feature.ID"="featureID")) %>% 
+  distinct() %>%
+  mutate(metab.category = tmp$metab.category[match(feature.ID, tmp$featureID)]) -> mofa.annot
+```
+
+Create MOFA data
+
+```{r}
+write.table(mofa.input.df, file="~/Projects/DHR/out/MOFA2_v02/DHR_MOFA2_v02_input.txt", sep="\t", quote=F, row.names = F)
+write.table(mofa.annot, file="~/Projects/DHR/out/MOFA2_v02/DHR_MOFA2_v02_annotation.txt", sep="\t", quote=F, row.names = F)
+
+mofa.data <- create_mofa(mofa.input.df)
+mofa.data
+plot_data_overview(mofa.data)
+```

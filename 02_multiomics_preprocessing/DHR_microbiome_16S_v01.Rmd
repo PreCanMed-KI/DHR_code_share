@@ -1,0 +1,820 @@
+---
+title: "DHR Microbiome (16S) v01"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+Require all the libraries
+```{r}
+require(phyloseq)
+require(DECIPHER)
+require(phangorn)
+require(dada2)
+require(plotly)
+require(DESeq2)
+require(openxlsx)
+require(doParallel)
+require(tidyverse)
+```
+
+# Read the data
+
+Read the OTU table and the clinical variable dataset.
+
+```{r}
+outDir <- "/home/francesco.marabita/Projects/DHR/data/Microbiome/out"
+dir.create(outDir)
+
+## read data
+otu.orig <- read.table("/home/francesco.marabita/Projects/DHR/data/Microbiome/DHR.dada2_cleaned.tsv", sep="\t", header=T, stringsAsFactors = F, check.names=F)
+counts.orig <- read.table("/home/francesco.marabita/Projects/DHR/data/Microbiome/DHR.16S_counts.tsv", sep="\t", header=T, stringsAsFactors = F)
+
+# match order
+counts.orig <- counts.orig[match(colnames(otu.orig[,grepl("DHR",colnames(otu.orig))]), counts.orig$SampleName),]
+all(counts.orig$SampleName == colnames(otu.orig[,grepl("DHR",colnames(otu.orig))]))
+
+# extract names
+sample.names <- strsplit(counts.orig$SampleName,"_")
+plate.names <- strsplit(counts.orig$SampleName,"_")
+for(i in 1:length(sample.names)){
+  sample.names[[i]] <- sample.names[[i]][length(sample.names[[i]])]
+  plate.names[[i]] <- plate.names[[i]][ grepl("27-\\d{4}B?",plate.names[[i]], perl=T) ]
+}
+sample.names <- unlist(sample.names)
+plate.names <- unlist(plate.names)
+
+## import phenotypic information
+load("/home/francesco.marabita/Projects/DHR/data/Clinical/Clin_data_2018-10-09_newVarNames.RData")
+pData.tmp <- clin.data[,!colnames(clin.data) %in% "Birth.date"]
+# change Visit.number to factor (useful for visualization and analyis)
+pData.tmp$Visit.number <- as.factor(pData.tmp$Visit.number)
+counts.orig$ID <- sample.names
+pData.tmp <- merge(pData.tmp,counts.orig)
+
+## import collection date
+samp.date.df <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Other/Sampling_date_saliva_stool_20190129_133000.xlsx",
+                      sheet = 1, detectDates = T)
+samp.date.df %>% 
+  select(c("subject","uloste_keräyspvm","uloste_käsittelypvm")) %>% 
+  rename(ID=subject, stool_collect_date=uloste_keräyspvm, stool_process_date=uloste_käsittelypvm) -> samp.date.df
+pData.tmp <- merge(pData.tmp, samp.date.df)
+
+## import antibiotic use
+antib.df <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Other/Antibiotics_processed.xlsx",
+                      sheet = "all_visits",detectDates = T)
+pData.tmp <- merge(pData.tmp, antib.df)
+pData.tmp$Antibiotic_free_days <- as.numeric(pData.tmp$stool_collect_date - pData.tmp$Antibiotic_end)
+# if Antibiotic_free_time is negative (in case of estimated end of cure), change to 0
+pData.tmp$Antibiotic_free_days[pData.tmp$Antibiotic_free_days<0] <- 0 
+```
+
+
+Convert to phyloseq format.
+
+```{r}
+# count matrix
+otumat <- otu.orig[,grepl("DHR",colnames(otu.orig))]
+rownames(otumat) <- otu.orig$Seq_ID
+colnames(otumat) <- sample.names
+
+# restrict to samples present in clin.data and then to features with rowSums>0
+sample.names <- sample.names[colnames(otumat) %in% pData.tmp$ID]
+plate.names <- plate.names[colnames(otumat) %in% pData.tmp$ID]
+otumat <- otumat[, sample.names]
+otumat <- as.matrix(otumat[rowSums(otumat)>0,])
+feature.names <- rownames(otumat)
+
+# taxonomy matrix
+taxmat <- otu.orig[,"Taxonomy"]
+taxmat <- strsplit(as.character(taxmat),";")
+names(taxmat) <- otu.orig$Seq_ID
+for(i in 1:length(taxmat)){
+  taxmat[[i]] <- as.data.frame(matrix(taxmat[[i]],nrow = 1, ncol = length(taxmat[[i]]), byrow = T), stringsAsFactors = F)
+  colnames(taxmat[[i]]) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")[1:ncol(taxmat[[i]])]
+}
+taxmat <- bind_rows(taxmat)
+rownames(taxmat) <- otu.orig$Seq_ID
+taxmat <- as.matrix(taxmat[rownames(taxmat) %in% feature.names,])
+
+# sample data
+sampdf <- data.frame(ID=sample.names, Plate_ID=plate.names)
+sampdf <- merge(sampdf, pData.tmp, by="ID")
+#sampdf <- as.data.frame(pData.tmp[na.omit(match(sample.names, pData.tmp$ID)),])
+rownames(sampdf) <- sampdf$ID
+
+# phylogenetic tree
+# seqs <- otu.orig$Sequence[otu.orig$Seq_ID %in% feature.names]
+# names(seqs) <- otu.orig$Seq_ID[otu.orig$Seq_ID %in% feature.names]
+# alignment <- AlignSeqs(DNAStringSet(seqs), anchor=NA,verbose=FALSE, processors = 36)
+# names(alignment) <- names(seqs)
+# save(alignment, file=paste0(outDir, "/alignment_v01.RData"))
+# writeXStringSet(alignment, filepath=paste0(outDir, "/alignment_v01.fasta"))
+# phangAlign <- phyDat(as(alignment, "matrix"), type="DNA")
+# dm <- dist.ml(phangAlign, model = "JC69")
+# save(dm, file=paste0(outDir, "/distance_v01.RData"))
+# treeNJ <- NJ(dm)
+# save(treeNJ, treeUPGMA, file=paste0(outDir, "/trees_v01.RData"))
+# fit <- pml(treeNJ, data=phyDat(as(alignment, "matrix"), type="DNA"))
+# fit <- optim.pml(fit, optNni = T)
+# fitGTR <- update(fit, k=4, inv=0.2)
+# save(fitGTR, file=paste0(outDir, "/fit_GTR_v01.RData"))
+# fitGTR.optim <- optim.pml(fitGTR, model="GTR", optInv=TRUE, optGamma=TRUE,
+#                            rearrangement = "stochastic", control = pml.control(trace = 0))
+
+load("~/Projects/DHR/data/Microbiome/out/fitGTR_optim_v01.RData")
+all(rownames(fitGTR.optim$tree)==rownames(otumat))
+
+# phyloseq object
+physeq <- phyloseq(otu_table(otumat, taxa_are_rows = T),
+                   sample_data(sampdf),
+                   tax_table(taxmat),
+                   phy_tree(fitGTR.optim$tree))
+
+# save(physeq, file=paste0(outDir, "/phyloseq_v01.RData"))
+```
+
+
+# Prevalence and abundance histograms
+
+Calculating prevalence, defined here as the number of samples in which a taxa appears at least once. 
+```{r}
+table(tax_table(physeq)[, "Phylum"], exclude = NULL)
+
+# Compute prevalence of each feature
+prevdf <- apply(X = otu_table(physeq), 1, function(x) sum(x > 0))
+
+# Add taxonomy and total read counts
+prevdf <- data.frame(Prevalence = prevdf,
+                     TotalAbundance = taxa_sums(physeq),
+                     tax_table(physeq))
+
+prevdf %>% 
+  group_by(Phylum) %>% 
+  summarise(mean_prev=mean(Prevalence), total_prev=sum(Prevalence)) -> prevdf.summary
+
+DT::datatable(prevdf.summary, options = list(pageLength = nrow(prevdf.summary)))
+```
+```{r}
+#prevdf1 = subset(prevdf, Phylum %in% get_taxa_unique(ps1, "Phylum"))
+ggplot(prevdf, aes(TotalAbundance, Prevalence / nsamples(physeq), color=Phylum)) +
+  geom_point(size = 2, alpha = 0.7) +
+  scale_x_log10() +
+  xlab("Total Abundance") +
+  ylab("Prevalence [Frac. Samples]") +
+  facet_wrap(~Phylum) + theme(legend.position="none")
+```
+
+Check the distribution of the abundances
+
+```{r}
+require(scales)
+qplot(rowSums(otu_table(physeq), na.rm = T), geom="histogram", xlab="Total counts", ylab="number of OTUs") +
+  scale_x_log10(labels=comma)
+qplot(colSums(otu_table(physeq), na.rm = T), geom="histogram", xlab="Total counts", ylab="number of samples") +
+  scale_x_log10(labels=comma)
+```
+
+The distribution could be associated to the Plate_ID.
+```{r, fig.height=15, fig.width=7}
+data.frame(ID=sample_names(physeq),
+           Total_counts=colSums(otu_table(physeq), na.rm = T),
+           Plate_ID=sample_data(physeq)$Plate_ID) %>% 
+  ggplot(aes(x=Total_counts)) +
+  geom_histogram(aes(fill=Plate_ID)) +
+  scale_x_log10(labels=comma) +
+  facet_wrap(~Plate_ID, ncol=1)
+
+```
+
+Remove taxa if:
+
+* Phylum is NA
+* Taxa Total Prevalence <=2
+* Taxa total counts <= 10
+
+```{r}
+ps0 <- subset_taxa(physeq, !is.na(Phylum))
+ps0 <- subset_taxa(ps0, !Phylum %in% prevdf.summary$Phylum[prevdf.summary$total_prev<=2])
+ps0 <- filter_taxa(ps0, function(x) sum(x, na.rm = T)>10 , prune = T)
+ps0
+
+require(scales)
+qplot(rowSums(otu_table(ps0), na.rm = T), geom="histogram", xlab="Total counts", ylab="number of OTUs") +
+  scale_x_log10(labels=comma)
+qplot(colSums(otu_table(ps0), na.rm = T), geom="histogram", xlab="Total counts", ylab="number of samples") +
+  scale_x_log10(labels=comma)
+
+```
+
+```{r}
+prevdf0 <- prevdf[rownames(prevdf) %in% taxa_names(ps0),]
+ggplot(prevdf0, aes(TotalAbundance, Prevalence / nsamples(ps0), color=Phylum)) +
+  geom_point(size = 2, alpha = 0.7) +
+  scale_x_log10() +
+  xlab("Total Abundance") +
+  ylab("Prevalence [Frac. Samples]") +
+  facet_wrap(~Phylum) + theme(legend.position="none")
+```
+
+# Transformations
+
+## Agglomerate to genus
+
+```{r}
+ps1 <- tax_glom(physeq,taxrank = "Genus", NArm = F)
+length(get_taxa_unique(physeq, taxonomic.rank = "Genus"))
+length(get_taxa_unique(ps1, taxonomic.rank = "Genus"))
+
+# Compute prevalence of each feature
+prevdf1 <- apply(X = otu_table(ps1), 1, function(x) sum(x > 0))
+
+# Add taxonomy and total read counts
+prevdf1 <- data.frame(Prevalence = prevdf1,
+                      TotalAbundance = taxa_sums(ps1),
+                      cbind(as.matrix(tax_table(ps1))))
+
+prevdf1 %>%
+  group_by(Phylum) %>%
+  summarise(mean_prev=mean(Prevalence), total_prev=sum(Prevalence)) -> prevdf1.summary
+
+DT::datatable(prevdf1.summary, options = list(pageLength = nrow(prevdf1.summary)))
+
+ggplot(prevdf1, aes(TotalAbundance, Prevalence / nsamples(ps1), color=Phylum)) +
+  geom_point(size = 2, alpha = 0.7) +
+  scale_x_log10() +
+  xlab("Total Abundance") +
+  ylab("Prevalence [Frac. Samples]") +
+  facet_wrap(~Phylum) + theme(legend.position="none")
+
+```
+
+Remove taxa if:
+
+* Phylum is NA
+* Taxa Total Prevalence <=2
+* Taxa total counts <= 10
+
+Check the distribution of the abundances
+
+```{r}
+ps1 <- subset_taxa(ps1, !is.na(Phylum))
+ps1 <- subset_taxa(ps1, !Phylum %in% prevdf1.summary$Phylum[prevdf1.summary$total_prev<=2])
+ps1 <- filter_taxa(ps1, function(x) sum(x, na.rm = T)>10 , prune = T)
+ps1
+
+require(scales)
+qplot(rowSums(otu_table(ps1), na.rm = T), geom="histogram", xlab="Total counts", ylab="number of OTUs") +
+  scale_x_log10(labels=comma)
+qplot(colSums(otu_table(ps1), na.rm = T), geom="histogram", xlab="Total counts", ylab="number of samples") +
+  scale_x_log10(labels=comma)
+```
+
+## Relative frequencies
+
+```{r}
+physeq.freq <- transform_sample_counts(physeq, function(x) x / sum(x))
+ps0.freq <- transform_sample_counts(ps0, function(x) x / sum(x))
+ps1.freq <- transform_sample_counts(ps1, function(x) x / sum(x))
+```
+
+## DESeq2 transform
+
+```{r}
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+# physeq.deseq2 <-  phyloseq_to_deseq2(physeq, ~ IID + Visit.number)
+# geoMeans <- apply(counts(physeq.deseq2), 1, gm_mean)
+# physeq.deseq2 <- estimateSizeFactors(physeq.deseq2, geoMeans = geoMeans)
+# physeq.deseq2 <- varianceStabilizingTransformation(physeq.deseq2, blind = T)
+# physeq.vst <- physeq
+# otu_table(physeq.vst) <- otu_table(assay(physeq.deseq2), taxa_are_rows = T)
+# 
+# ps0.deseq2 <-  phyloseq_to_deseq2(ps0, ~ IID + Visit.number)
+# geoMeans <- apply(counts(ps0.deseq2), 1, gm_mean)
+# ps0.deseq2 <- estimateSizeFactors(ps0.deseq2, geoMeans = geoMeans)
+# ps0.deseq2 <- varianceStabilizingTransformation(ps0.deseq2, blind = T)
+# ps0.vst <- ps0
+# otu_table(ps0) <- otu_table(assay(ps0.deseq2), taxa_are_rows = T)
+# 
+ps1.deseq2 <-  phyloseq_to_deseq2(ps1, ~ 1)
+geoMeans <- apply(counts(ps1.deseq2), 1, gm_mean)
+ps1.deseq2 <- estimateSizeFactors(ps1.deseq2, geoMeans = geoMeans)
+ps1.deseq2 <- estimateDispersions(ps1.deseq2)
+# ps1.deseq2 <- varianceStabilizingTransformation(ps1.deseq2, blind = T)
+ps1.vst <- ps1
+otu_table(ps1.vst) <- otu_table(getVarianceStabilizedData(ps1.deseq2), taxa_are_rows = T)
+```
+
+
+# Ordination plots
+
+Use four distance methods to check for batch effect using plate ID as grouping variable. Check the original and the relative frequency dataset. The UniFrac method is valid only for the original, unpruned physeq object.
+
+```{r}
+dist_methods <- c("jsd", "bray", "jaccard", "gower","w")   
+
+# dlist <- vector("list", length(dist_methods))
+# dlist1 <- vector("list", length(dist_methods))
+# dlist.f <- vector("list", length(dist_methods))
+# dlist1.f <- vector("list", length(dist_methods))
+# 
+# names(dlist) <- names(dlist1) <- names(dlist.f) <- names(dlist1.f) <- dist_methods
+# 
+# for( i in dist_methods ){
+# 
+#   dlist[[i]] = phyloseq::distance(physeq, method=i)
+#   dlist1[[i]] =  phyloseq::distance(ps1, method=i)
+#   dlist.f[[i]] = phyloseq::distance(physeq.freq, method=i)
+#   dlist1.f[[i]] = phyloseq::distance(ps1.freq, method=i)
+# 
+#   message(paste0("Done with ", i))
+# }
+# save(dlist, dlist.f, dlist1, dlist1.f, file = paste0(outDir,"/DHR_microbiome_16S_dist_v01.RData"))
+load(file = paste0(outDir,"/DHR_microbiome_16S_dist_v01.RData"))
+
+```
+
+Plot the ordinations
+
+```{r}
+plist <- vector("list", length(dist_methods))
+plist1 <- vector("list", length(dist_methods))
+plist.f <- vector("list", length(dist_methods))
+plist1.f <- vector("list", length(dist_methods))
+
+names(plist) <- dist_methods
+names(plist1) <- dist_methods
+names(plist.f) <- dist_methods
+names(plist1.f) <- dist_methods
+
+for( i in dist_methods ){
+
+  # Calculate ordination
+  mds_ <- ordinate(physeq, "MDS", distance=dlist[[i]])
+  mds1  <- ordinate(ps1, "MDS", distance=dlist1[[i]])
+  mds.f  <- ordinate(physeq.freq, "MDS", distance=dlist.f[[i]])
+  mds1.f  <- ordinate(ps1.freq, "MDS", distance=dlist1.f[[i]])
+
+  # Make plot
+  # Don't carry over_ previous plot (if error, p will be blank)
+  p <- p1 <- p.f <- p1.f<- NULL
+  # Create plot, store as temp variable, p
+  p <- plot_ordination(physeq, mds_)
+  p1 <- plot_ordination(ps1, mds1)
+  p.f <- plot_ordination(physeq.freq, mds.f)
+  p1.f <- plot_ordination(ps1.freq, mds1.f)
+  # Add title to each plot
+  p <- p + ggtitle(paste("MDS using counts and distance method ", i, sep=""))
+  p1 <- p1 + ggtitle(paste("MDS using genera counts and distance method ", i, sep=""))
+  p.f <- p.f + ggtitle(paste("MDS using relative abundances and distance method ", i, sep=""))
+  p1.f <- p1.f + ggtitle(paste("MDS using genera relative abundances and distance method ", i, sep=""))
+  # Save the graphic to file.
+  plist[[i]] <- p
+  plist1[[i]] <-  p1
+  plist.f[[i]] <- p.f
+  plist1.f[[i]] <- p1.f
+
+  message(paste0("Done with ", i))
+}
+```
+
+```{r}
+
+df <- plyr::ldply(plist, function(x) x$data)
+names(df)[1] <- "distance"
+ggplot(df, aes(Axis.1, Axis.2, col=Plate_ID)) +
+  geom_point() +
+  facet_wrap(~distance, scales="free") + 
+  scale_color_brewer(palette = "RdYlBu") +
+  ggtitle("MDS on various distance metrics - counts") +
+  theme_bw()
+
+df <- plyr::ldply(plist1, function(x) x$data)
+names(df)[1] <- "distance"
+ggplot(df, aes(Axis.1, Axis.2, col=Plate_ID)) +
+  geom_point() +
+  facet_wrap(~distance, scales="free") + 
+  scale_color_brewer(palette = "RdYlBu") +
+  ggtitle("MDS on various distance metrics - genera counts") +
+  theme_bw()
+
+df <- plyr::ldply(plist.f, function(x) x$data)
+names(df)[1] <- "distance"
+ggplot(df, aes(Axis.1, Axis.2, col=Plate_ID)) +
+  geom_point() +
+  facet_wrap(~distance, scales="free") + 
+  scale_color_brewer(palette = "RdYlBu") +
+  ggtitle("MDS on various distance metrics  - relative abundance") +
+  theme_bw()
+
+df <- plyr::ldply(plist1.f, function(x) x$data)
+names(df)[1] <- "distance"
+ggplot(df, aes(Axis.1, Axis.2, col=Plate_ID)) +
+  geom_point() +
+  facet_wrap(~distance, scales="free") + 
+  scale_color_brewer(palette = "RdYlBu") +
+  ggtitle("MDS on various distance metrics  - genera relative abundance") +
+  theme_bw()
+```
+
+Individuals plots for UniFrac distance.
+```{r}
+cl <- makeCluster(24)
+registerDoParallel(cl)
+unifrac.d <- UniFrac(physeq, parallel = T)
+#wunifrac.d <- UniFrac(physeq, parallel = T, weighted = T)
+stopCluster(cl)
+
+mds.unifrac <- ordinate(physeq, method ="MDS", distance=unifrac.d)
+ggplotly(plot_ordination(physeq,ordination = mds.unifrac) +
+  aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+ggplotly(plot_ordination(physeq,ordination = mds.unifrac,axes = c(1,2)) +
+  aes(col=Plate_ID, text=IID))
+```
+
+Individuals plots for other distance measures.
+```{r}
+ggplotly(plist[["bray"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+ggplotly(plist[["gower"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+ggplotly(plist[["jaccard"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+ggplotly(plist[["jaccard"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+ggplotly(plist[["w"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+```
+
+```{r}
+ggplotly(plist.f[["bray"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+ggplotly(plist.f[["gower"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+ggplotly(plist.f[["jaccard"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+ggplotly(plist.f[["jsd"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+ggplotly(plist.f[["w"]] + aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+```
+
+Plot for VST-transformed data.
+
+```{r}
+mds.vst <- ordinate(ps1.vst, "MDS", distance="euclidean")
+ggplotly(plot_ordination(ps1.vst,ordination = mds.vst) +
+  aes(col=Plate_ID, text=IID) + scale_color_brewer(palette = "RdYlBu"))
+```
+
+
+It looks that using relative abundances reduces the plate effect. This is good because the plates might be counfounded with the visit number.
+
+```{r}
+qplot(Visit.number, Plate_ID, data=data.frame(sample_data(physeq)), geom="jitter", height=0)
+```
+
+I will test formally the reduction of the batch effect on the original data.
+
+```{r}
+df <- plyr::ldply(plist, function(x) x$data)
+df <- subset(df, .id=="bray")
+
+anova(lm(Axis.1 ~ 0 + Plate_ID, data=df))
+summary(lm(Axis.1 ~ 0 + Plate_ID, data=df))
+
+anova(lm(Axis.2 ~ 0 + Plate_ID, data=df))
+summary(lm(Axis.2 ~ 0 + Plate_ID, data=df))
+
+```
+
+The Plate_ID is associated with both component 1 and 2 using counts and  Bray–Curtis distance. I will test the relative abunances.
+
+```{r}
+df <- plyr::ldply(plist.f, function(x) x$data)
+df <- subset(df, .id=="bray")
+
+anova(lm(Axis.1 ~ 0 + Plate_ID, data=df))
+summary(lm(Axis.1 ~ 0 + Plate_ID, data=df))
+
+anova(lm(Axis.2 ~ 0 + Plate_ID, data=df))
+summary(lm(Axis.2 ~ 0 + Plate_ID, data=df))
+
+```
+
+I will test also the agglomoeration to genus and the VST transformation.
+
+```{r}
+df <- plyr::ldply(plist1, function(x) x$data)
+df <- subset(df, .id=="bray")
+
+anova(lm(Axis.1 ~ 0 + Plate_ID, data=df))
+summary(lm(Axis.1 ~ 0 + Plate_ID, data=df))
+
+anova(lm(Axis.2 ~ 0 + Plate_ID, data=df))
+summary(lm(Axis.2 ~ 0 + Plate_ID, data=df))
+
+```
+
+```{r}
+df <- data.frame(Axis.1=mds.vst$vectors[,1], Axis.2= mds.vst$vectors[,2],Plate_ID=sample_data(ps1.vst)$Plate_ID)
+
+anova(lm(Axis.1 ~ 0 + Plate_ID, data=df))
+summary(lm(Axis.1 ~ 0 + Plate_ID, data=df))
+
+anova(lm(Axis.2 ~ 0 + Plate_ID, data=df))
+summary(lm(Axis.2 ~ 0 + Plate_ID, data=df))
+```
+
+There is still a sing of association, but it is defintely reduced.
+
+# Alpha diversity
+
+Richness calculation is striclty valid only for the original untrimmed dataset.
+
+```{r}
+plot_richness(physeq, measures = "Shannon", x="IID") +
+  geom_boxplot() + geom_point(aes(col=Visit.number)) +
+  scale_color_viridis_d(name="Visit.number")
+plot_richness(physeq, measures = "Shannon", x="ID", color ="Plate_ID") + scale_color_viridis_d()
+
+plot_richness(ps0, measures = "Shannon", x="IID") +
+  geom_boxplot() + geom_point(aes(col=Visit.number)) +
+  scale_color_viridis_d(name="Visit.number")
+plot_richness(ps0, measures = "Shannon",  x="ID", color = "Plate_ID") +  scale_color_viridis_d()
+
+plot_richness(ps1, measures = "Shannon", x="IID") +
+  geom_boxplot() + geom_point(aes(col=Visit.number)) +
+  scale_color_viridis_d(name="Visit.number")
+plot_richness(ps1, measures = "Shannon",  x="ID", color = "Plate_ID") +  scale_color_viridis_d()
+
+plot(estimate_richness(physeq, measures = "Shannon")[,1], estimate_richness(ps0, measures = "Shannon")[,1])
+plot(estimate_richness(physeq, measures = "Shannon")[,1], estimate_richness(ps1, measures = "Shannon")[,1])
+
+tmp1 <- estimate_richness(physeq, measures = "Shannon")[,1, drop=F]
+tmp2 <- estimate_richness(ps1, measures = "Shannon")[,1, drop=F]
+tmp3 <- merge(tmp1, tmp2, by="row.names")
+colnames(tmp3) <- c("ID", "alpha_div_0", "alpha_div_1")
+tmp3$IID <- pData.tmp$IID[match(tmp3$ID, pData.tmp$ID)]
+#write.table(tmp3, file = paste0(outDir, "/alpha_div.txt"), sep="\t", quote=F, row.names = F)
+```
+
+Calculate alpha diversity also with rarified counts and compare.
+
+```{r}
+physeq.rarify <- rarefy_even_depth(physeq, rngseed = 12345)
+ps1.rarify <- rarefy_even_depth(ps1, rngseed = 12345)
+
+plot_richness(physeq.rarify, measures = "Shannon", x="IID") +
+  geom_boxplot() + geom_point(aes(col=Visit.number)) +
+  scale_color_viridis_d(name="Visit.number")
+plot_richness(physeq, measures = "Shannon", x="ID", color ="Plate_ID") + scale_color_viridis_d()
+
+
+plot_richness(ps1.rarify, measures = "Shannon", x="IID") +
+  geom_boxplot() + geom_point(aes(col=Visit.number)) +
+  scale_color_viridis_d(name="Visit.number")
+plot_richness(ps1.rarify, measures = "Shannon",  x="ID", color = "Plate_ID") +  scale_color_viridis_d()
+
+plot(estimate_richness(physeq.rarify, measures = "Shannon")[,1], estimate_richness(physeq, measures = "Shannon")[,1])
+plot(estimate_richness(ps1.rarify, measures = "Shannon")[,1], estimate_richness(ps1, measures = "Shannon")[,1])
+
+
+tmp1 <- estimate_richness(physeq.rarify, measures = "Shannon")[,1, drop=F]
+tmp2 <- estimate_richness(ps1.rarify, measures = "Shannon")[,1, drop=F]
+tmp3 <- merge(tmp1, tmp2, by="row.names")
+colnames(tmp3) <- c("ID", "alpha_div_0_rarif", "alpha_div_1_rarif")
+tmp3$IID <- pData.tmp$IID[match(tmp3$ID, pData.tmp$ID)]
+#write.table(tmp3, file = paste0(outDir, "/alpha_div_rarified.txt"), sep="\t", quote=F, row.names = F)
+
+```
+
+
+Check if antibiotic use affects alpha diversity
+
+```{r fig.height=10, fig.width=10}
+plot_richness(physeq, measures = "Shannon", x="Visit.number") +
+  geom_line(aes(group=IID)) + geom_point(aes(col=Antibiotic_free_days<14)) +
+  scale_color_manual("Antibiotic use", values = c("TRUE"="red", "FALSE"="blue"), 
+                     breaks=c("TRUE", "FALSE", NA), labels=c("<2w", ">2w", "No use"),
+                     na.value="black") +
+  ylab("Shannon diversity")+
+  facet_wrap(~IID)+
+  ggtitle("OTU-lelel alpha-diversity")
+
+
+plot_richness(physeq.rarify, measures = "Shannon", x="Visit.number") +
+  geom_line(aes(group=IID)) + geom_point(aes(col=Antibiotic_free_days<14)) +
+  scale_color_manual("Antibiotic use", values = c("TRUE"="red", "FALSE"="blue"), 
+                     breaks=c("TRUE", "FALSE", NA), labels=c("<2w", ">2w", "No use"),
+                     na.value="black") +
+  ylab("Shannon diversity")+
+  facet_wrap(~IID)+
+  ggtitle("OTU-lelel alpha-diversity")
+
+
+plot_richness(ps1, measures = "Shannon", x="Visit.number") +
+  geom_line(aes(group=IID)) + geom_point(aes(col=Antibiotic_free_days<14)) +
+  scale_color_manual("Antibiotic use", values = c("TRUE"="red", "FALSE"="blue"), 
+                     breaks=c("TRUE", "FALSE", NA), labels=c("<2w", ">2w", "No use"),
+                     na.value="black") +
+  ylab("Shannon diversity")+
+  facet_wrap(~IID)+
+  ggtitle("Genus-lelel alpha-diversity")
+
+plot_richness(ps1.rarify, measures = "Shannon", x="Visit.number") +
+  geom_line(aes(group=IID)) + geom_point(aes(col=Antibiotic_free_days<14)) +
+  scale_color_manual("Antibiotic use", values = c("TRUE"="red", "FALSE"="blue"), 
+                     breaks=c("TRUE", "FALSE", NA), labels=c("<2w", ">2w", "No use"),
+                     na.value="black") +
+  ylab("Shannon diversity")+
+  facet_wrap(~IID)+
+  ggtitle("Genus-lelel alpha-diversity")
+
+
+```
+
+Check if antibiotic use affects the observed number of taxa.
+
+```{r fig.height=10, fig.width=10}
+plot_richness(physeq, measures = "Observed", x="Visit.number") +
+  geom_line(aes(group=IID)) + geom_point(aes(col=Antibiotic_free_days<14)) +
+  scale_color_manual("Antibiotic use", values = c("TRUE"="red", "FALSE"="blue"), 
+                     breaks=c("TRUE", "FALSE", NA), labels=c("<2w", ">2w", "No use"),
+                     na.value="black") +
+  ylab("Observed diversity")+
+  facet_wrap(~IID)+
+  ggtitle("OTU-lelel alpha-diversity")
+
+plot_richness(physeq.rarify, measures = "Observed", x="Visit.number") +
+  geom_line(aes(group=IID)) + geom_point(aes(col=Antibiotic_free_days<14)) +
+  scale_color_manual("Antibiotic use", values = c("TRUE"="red", "FALSE"="blue"), 
+                     breaks=c("TRUE", "FALSE", NA), labels=c("<2w", ">2w", "No use"),
+                     na.value="black") +
+  ylab("Observed diversity")+
+  facet_wrap(~IID)+
+  ggtitle("OTU-lelel alpha-diversity")
+
+
+plot_richness(ps1, measures = "Observed", x="Visit.number") +
+  geom_line(aes(group=IID)) + geom_point(aes(col=Antibiotic_free_days<14)) +
+  scale_color_manual("Antibiotic use", values = c("TRUE"="red", "FALSE"="blue"), 
+                     breaks=c("TRUE", "FALSE", NA), labels=c("<2w", ">2w", "No use"),
+                     na.value="black") +
+  ylab("Observed diversity")+
+  facet_wrap(~IID)+
+  ggtitle("Genus-level alpha-diversity")
+
+plot_richness(ps1, measures = "Observed", x="Visit.number") +
+  geom_line(aes(group=IID)) + geom_point(aes(col=Antibiotic_free_days<14)) +
+  scale_color_manual("Antibiotic use", values = c("TRUE"="red", "FALSE"="blue"), 
+                     breaks=c("TRUE", "FALSE", NA), labels=c("<2w", ">2w", "No use"),
+                     na.value="black") +
+  ylab("Observed diversity")+
+  facet_wrap(~IID)+
+  ggtitle("Genus-level alpha-diversity")
+```
+
+
+# Beta diversity
+
+I will choose the UniFrac distance as a measure of beta diversity and calculate the intra-individual and the inter-individual beta diversity.
+```{r}
+
+beta.list <- vector("list", length(unique(sample_data(physeq)$IID)))
+names(beta.list) <- unique(sample_data(physeq)$IID)
+for (i in unique(sample_data(physeq)$IID)) {
+  beta.list[[i]] <- list(intra.dist=numeric(), inter.dist=numeric())
+  idx <- labels(unifrac.d) %in% sample_data(physeq)$ID[sample_data(physeq)$IID %in% i]
+  
+  tmp.mat <- as.matrix(unifrac.d)
+  tmp.mat <- tmp.mat[idx, idx]
+  beta.list[[i]]$intra.dist <- c(tmp.mat[lower.tri(tmp.mat, diag = F)])
+  
+  tmp.mat <- as.matrix(unifrac.d)
+  tmp.mat <- tmp.mat[idx, !idx]
+  beta.list[[i]]$inter.dist <- c(tmp.mat)
+}   
+
+intra.med <- unlist(lapply(beta.list, function(x) median(x$intra.dist)))
+inter.med <- lapply(beta.list, function(x) x$inter.dist)
+
+intra.med <- sort(intra.med, decreasing = T)
+inter.med <- inter.med[names(intra.med)]
+boxplot(inter.med, ylim=c(0,1), cex=0.2, main="UniFrac beta diverstity", las=2, cex.axis=0.5)
+points(intra.med, pch=19, col="red", cex=0.8)
+
+```
+
+# Create MAExp
+
+## Required elements
+
+The MultiAssayExperiment class requires:
+
+1. `colData`: primary data (i.e. info on biological units: subjects)
+2. `ExperimentList`: experimental data
+3. `sampleMap`: relating `colData` to multiple assays
+
+Source for experimental data are the multuple omics and the quantitative clinical variables. The source for the `colData` object will be the RData file with the clinical data.
+
+```{r}
+require(MultiAssayExperiment)
+```
+
+### `colData`
+
+```{r}
+clus.df <- read.table("/home/francesco.marabita/Projects/DHR/data/Clinical/DHR_clinData_clusters.txt", header=T)
+colnames(clus.df)[1] <- "IID"
+
+
+pData <- clin.data[,c("IID", "ID", "Visit.number", "Birth.date", "Age", "Visit.date", "Visit.time", "Sex")]
+pData$Sample.name <- paste0(pData$IID, "_", pData$Visit.number)
+pData <- arrange(pData, IID, Visit.number)
+pData <- merge(pData, clus.df, by="IID")
+
+pData <- DataFrame(pData)
+rownames(pData) <- pData$ID
+
+head(pData, 10)
+
+pData.IID <- pData[, c("IID", "Birth.date", "Sex", "clust.all", "clust.mf.comb", "clust.mf2")]
+pData.IID <- pData.IID[!duplicated(pData.IID),]
+rownames(pData.IID) <- pData.IID$IID
+
+head(pData.IID, 10)
+```
+
+### `ExperimentList`
+
+```{r}
+
+objlist <- list("physeq" = SummarizedExperiment(assays = list(otu_table=as(otu_table(physeq), "matrix")),
+                                                rowData = DataFrame(as(tax_table(physeq), "matrix")),
+                                                colData = DataFrame(as(sample_data(physeq), "matrix"))),
+                
+                "physeq.f" = SummarizedExperiment(assays = list(otu_table=as(otu_table(physeq.freq), "matrix")),
+                                                rowData = DataFrame(as(tax_table(physeq.freq), "matrix")),
+                                                colData = DataFrame(as(sample_data(physeq.freq), "matrix"))),
+                
+                "physeq.filt" = SummarizedExperiment(assays = list(otu_table=as(otu_table(ps0), "matrix")),
+                                                rowData = DataFrame(as(tax_table(ps0), "matrix")),
+                                                colData = DataFrame(as(sample_data(ps0), "matrix"))),
+                
+                "physeq.filt.f" = SummarizedExperiment(assays = list(otu_table=as(otu_table(ps0.freq), "matrix")),
+                                                rowData = DataFrame(as(tax_table(ps0.freq), "matrix")),
+                                                colData = DataFrame(as(sample_data(ps0.freq), "matrix"))),
+                
+                "physeq.genera" = SummarizedExperiment(assays = list(otu_table=as(otu_table(ps1), "matrix")),
+                                                rowData = DataFrame(as(tax_table(ps1), "matrix")),
+                                                colData = DataFrame(as(sample_data(ps1), "matrix"))),
+                
+                "physeq.genera.f" = SummarizedExperiment(assays = list(otu_table=as(otu_table(ps1.freq), "matrix")),
+                                                rowData = DataFrame(as(tax_table(ps1.freq), "matrix")),
+                                                colData = DataFrame(as(sample_data(ps1.freq), "matrix"))),
+                
+                "physeq.genera.vst" = SummarizedExperiment(assays = list(otu_table=as(otu_table(ps1.vst), "matrix")),
+                                                rowData = DataFrame(as(tax_table(ps1.vst), "matrix")),
+                                                colData = DataFrame(as(sample_data(ps1.vst), "matrix")))
+                )
+```
+
+### `sampleMap`
+```{r}
+listmap <- list(physeq = data.frame(primary = sample_data(physeq)$IID,
+                                    colname = sample_names(physeq),
+                                    stringsAsFactors = FALSE),
+                physeq.f = data.frame(primary = sample_data(physeq.freq)$IID,
+                                      colname = sample_names(physeq.freq),
+                                      stringsAsFactors = FALSE),
+                physeq.filt = data.frame(primary = sample_data(ps0)$IID,
+                                         colname = sample_names(ps0),
+                                         stringsAsFactors = FALSE),
+                physeq.filt.f = data.frame(primary = sample_data(ps0.freq)$IID,
+                                           colname = sample_names(ps0.freq),
+                                           stringsAsFactors = FALSE),
+                physeq.genera = data.frame(primary = sample_data(ps1)$IID,
+                                           colname = sample_names(ps1),
+                                           stringsAsFactors = FALSE),
+                physeq.genera.f = data.frame(primary = sample_data(ps1.freq)$IID,
+                                             colname = sample_names(ps1.freq),
+                                             stringsAsFactors = FALSE),
+                physeq.genera.vst = data.frame(primary = sample_data(ps1.vst)$IID,
+                                               colname = sample_names(ps1.vst),
+                                               stringsAsFactors = FALSE))
+
+dfmap <- listToMap(listmap)
+```
+
+Before creating the `MultiAssayExperiment` object I check that there are no problems.
+
+```{r}
+prep <- prepMultiAssay(ExperimentList = objlist, colData = pData.IID, sampleMap = dfmap)
+
+microbiome.MAExp <- MultiAssayExperiment(experiments = objlist, colData = pData.IID, sampleMap = dfmap)
+```
+
+```{r}
+# save(microbiome.MAExp , file="/home/francesco.marabita/Projects/DHR/data/Microbiome/out/DHR_microbiome_16S_MAExp_v01.RData")
+# save.image(file="/home/francesco.marabita/Projects/DHR/data/Microbiome/out/DHR_microbiome_16S_v01.RData")
+```
+

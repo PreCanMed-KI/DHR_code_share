@@ -1,0 +1,391 @@
+---
+title: "DHR clinical variables GEE v04"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 5
+    theme: cerulean
+    toc: yes
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+# Analysis of the longitudinal outcome for the clinical variables
+
+The goal of this analysis is to follow longitudinally the values of the clinical variables and visualize the fraction of variables that moved from the out-of-range value to the reference range and vice versa. Only visits 2-5 will be considered as data feedback occurred only at visit 2, therefore no change should be expected at between visit 1 and 2.
+
+Require the libraries
+
+```{r}
+require(openxlsx)
+require(tidyverse)
+require(geepack)
+require(doParallel)
+require(doBy)
+require(multcomp)
+require(lme4)
+require(car)
+require(boot)
+```
+
+Load the data
+
+```{r}
+load("/home/francesco.marabita/Projects/DHR/data/Clinical/Clin_data_2018-10-09_newVarNames.RData")
+ref.val <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Clinical/Reference_values_updated.xlsx", sheet = 1)
+var.cat <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Clinical/Variables_names.xlsx", sheet = 1)
+```
+
+Select only numerical measurements, ID variables and make long format. Make sure that observations are ordered by Visit.number as GEE requires that longitudinal observation are ordered by time.
+
+```{r}
+
+sel.var <- c("IID", "ID", "Visit.number", "Age", "Visit.date", "Sex",
+             "SystolicBP_mean", "DiastolicBP_mean", "PULSE_mean",
+             "BMI", "Waist", "Hip",  "MCV", "MCH",
+             "fBLeuk", "BHb", "ERDW", "BHKR", "BTrom","BEryt",
+             "STSH",  "SD25", "hsCRP", "PGT", "fPGluk", "SInsu",
+             "fPTrigly","fPKol","fPKolHDL", "fpKolLDL","KolHDLrat",     
+             "fSLipoA1", "fSLipoB", "ApoB_ApoA1ratio")
+
+clin.data %>%
+  filter(Visit.number>=2) %>% 
+  select_at(sel.var) %>%
+  gather(key="variable", value = "value", -(IID:Sex)) %>% 
+  arrange(IID, Visit.number, variable) -> clin.data.long
+
+clin.data %>%
+  filter(Visit.number>=2) %>% 
+  select_at(sel.var[!sel.var %in% c("IID", "ID", "Visit.number", "Age", "Visit.date", "Sex")]) %>%
+  t() -> clin.m
+colnames(clin.m) <- clin.data$ID[clin.data$Visit.number>=2]
+
+```
+
+Process reference value table, by including only the selected numerical variables and change the values to numeric
+
+```{r}
+ref.val <- ref.val[ref.val$feature.ID %in% rownames(clin.m),]
+ref.val <- ref.val[order(match(ref.val$feature.ID, rownames(clin.m))),]
+
+ref.val$ref_low_F <- as.numeric(ref.val$ref_low_F)
+ref.val$ref_high_F <- as.numeric(ref.val$ref_high_F)
+ref.val$ref_low_M <- as.numeric(ref.val$ref_low_M)
+ref.val$ref_high_M <- as.numeric(ref.val$ref_high_M)
+```
+
+Create the logical matrix `ref.out`, in a way that `ref.out[i,j]` is T if values are out-of-range.
+
+```{r}
+ref.out <- matrix(NA, nrow=nrow(clin.m), ncol=ncol(clin.m),
+                  dimnames = list(rownames(clin.m), colnames(clin.m)))
+for(i in 1:nrow(clin.m)){
+  for(j in 1:ncol(clin.m)){
+    if(clin.data$Sex[clin.data$ID==colnames(clin.m)[j]]=="F"){
+      ref.out[i,j] <- clin.m[i,j] < ref.val$ref_low_F[i] | clin.m[i,j] > ref.val$ref_high_F[i]
+    } else if(clin.data$Sex[clin.data$ID==colnames(clin.m)[j]]=="M"){
+      ref.out[i,j] <- clin.m[i,j] < ref.val$ref_low_M[i] | clin.m[i,j] > ref.val$ref_high_M[i]
+    }
+  }
+}
+```
+
+fPTrigly has age-dependent ref values and has to be fixed
+
+```{r}
+
+for(j in 1:ncol(clin.m)){
+  if(clin.data$Sex[clin.data$ID==colnames(clin.m)[j]]=="F") {
+    if(clin.data$Age[clin.data$ID==colnames(clin.m)[j]]>20 &
+       clin.data$Age[clin.data$ID==colnames(clin.m)[j]]<=30) {
+      ref.out["fPTrigly",j] <- clin.m["fPTrigly",j] > 1.5
+    } else if(clin.data$Age[clin.data$ID==colnames(clin.m)[j]]>30 &
+              clin.data$Age[clin.data$ID==colnames(clin.m)[j]]<=50) {
+      ref.out["fPTrigly",j] <- clin.m["fPTrigly",j] > 1.7
+    } else if(clin.data$Age[clin.data$ID==colnames(clin.m)[j]]>50) {
+      ref.out["fPTrigly",j] <- clin.m["fPTrigly",j] > 2
+    }
+  } else if(clin.data$Sex[clin.data$ID==colnames(clin.m)[j]]=="M") {
+    if(clin.data$Age[clin.data$ID==colnames(clin.m)[j]]>20 &
+       clin.data$Age[clin.data$ID==colnames(clin.m)[j]]<=30) {
+      ref.out["fPTrigly",j] <- clin.m["fPTrigly",j] > 1.7
+    } else if(clin.data$Age[clin.data$ID==colnames(clin.m)[j]]>30 &
+              clin.data$Age[clin.data$ID==colnames(clin.m)[j]]<=50) {
+      ref.out["fPTrigly",j] <- clin.m["fPTrigly",j] > 2
+    } else if(clin.data$Age[clin.data$ID==colnames(clin.m)[j]]>50) {
+      ref.out["fPTrigly",j] <- clin.m["fPTrigly",j] > 2
+    }
+  }
+}
+
+```
+
+The GEE estimates are consistent if the values are missing completely at random. However, the 5th visit has more missing values than the other. To stay on the safe side, I will remove the IID with incomplete longitudinal data. 
+
+```{r}
+for(i in unique(clin.data.long$IID)){
+  if(length(unique(clin.data.long$Visit.number[clin.data.long$IID==i]))!=length(unique(clin.data.long$Visit.number))) {
+    clin.data.long <- clin.data.long[clin.data.long$IID!=i,]
+  }
+}
+```
+
+Add "Out of range (OOR)" and "Out of range at baseline (OORB)" variables. In this case baseline will be visit 2.
+
+```{r}
+clin.data.long$OOR <- NA
+clin.data.long$OORB <- NA
+for(i in 1:nrow(ref.out)) {
+  for(j in 1:ncol(ref.out)) {
+    var.i <- rownames(ref.out)[i]
+    ID.j <- colnames(ref.out)[j]
+    IID.j <- clin.data$IID[ clin.data$ID %in% ID.j]
+    ID.j.bas <- clin.data$ID[ clin.data$IID %in% IID.j & clin.data$Visit.number==2]
+    clin.data.long$OOR[clin.data.long$variable==var.i & clin.data.long$ID==ID.j] <- ref.out[i,j]
+    clin.data.long$OORB[clin.data.long$variable==var.i & clin.data.long$ID==ID.j] <- ref.out[i, colnames(ref.out) %in% ID.j.bas]
+  }
+}
+```
+
+## Fit GEE
+I will model each variable as a function of `Sex`, `Age` and `Visit.number`. I will extract estimates for the whole polutation if there are no OOR at baseline (`OORB`), or if less than 5 individuals.
+
+```{r}
+list.gee <- list()
+var <- unique(clin.data.long$variable)
+for(i in 1:length(var)){
+  
+  # if no OOR at baseline or all OOR is NA
+  if(all(!clin.data.long$OORB[clin.data.long$variable==var[i]]) |
+     all(is.na(clin.data.long$OOR[clin.data.long$variable==var[i]]))) {
+    
+    data.tmp <- clin.data.long[clin.data.long$variable==var[i] & !is.na(clin.data.long$value),]
+    data.tmp <- droplevels(data.tmp)
+    data.tmp <- as.data.frame(data.tmp)
+    
+    list.gee[[i]]<- geeglm(value ~ Sex + Age + I(Visit.number-2),
+                           id = as.factor(IID) , waves = Visit.number,
+                           family = "gaussian", corstr = "exchangeable",
+                           std.err = "san.se",
+                           data=data.tmp)
+    
+  } else {
+    
+    data.tmp <- clin.data.long[clin.data.long$variable==var[i] & !is.na(clin.data.long$value) & !is.na(clin.data.long$OORB),]
+    data.tmp <- droplevels(data.tmp)
+    data.tmp <- as.data.frame(data.tmp)
+    
+    # if OORB=T for >= 5 IID
+    if(length(unique(data.tmp$IID[data.tmp$OORB]))>=5) {
+      list.gee[[i]]<- geeglm(value ~ Sex + Age + I(Visit.number-2)*OORB,
+                           id = as.factor(IID) , waves = Visit.number,
+                           family = "gaussian", corstr = "exchangeable",
+                           std.err = "san.se",
+                           data=data.tmp)
+    } else {
+      list.gee[[i]]<- geeglm(value ~ Sex + Age + I(Visit.number-2),
+                           id = as.factor(IID) , waves = Visit.number,
+                           family = "gaussian", corstr = "exchangeable",
+                           std.err = "san.se",
+                           data=data.tmp)
+    }
+  }
+  
+  rm(data.tmp)
+}
+
+names(list.gee) <-  var
+
+summary.gee <- list()
+for(i in 1:length(list.gee)) {
+  summary.gee[[i]] <- summary(list.gee[[i]])
+}
+names(summary.gee) <- var
+
+```
+
+Test the marginal effect of `Visit.number`, as  a linear combination of `Visit.number` and `OORB`, if the interaction term was included.
+
+```{r}
+
+get.eff <- function(x) {
+  if(length(coefficients(x))==4) {
+    res <- esticon(x, c(0,0,0,1))
+    type <- "All"
+  } else {
+    res <- esticon(x, c(0,0,0,1,0,1))
+    type <- "OORB"
+  }
+  
+  n <- length(unique(x$data$IID[x$data$OORB]))
+  
+  return(c(res,type=type, n_OORB=n))
+}
+
+effect.m <- sapply(list.gee, get.eff)
+effect.df <- as.data.frame(t(effect.m))
+effect.df$FDR <- p.adjust(effect.df[,"Pr(>|X^2|)"], method = "fdr")
+
+DT::datatable(effect.df, options = list(scrollX=T))
+```
+
+
+For all the variables, print prediciton with bootstrapped SE. I will predict the effect for M and F and keeping `Age` constant and equal to the population mean.
+
+```{r}
+
+#sel.var <- na.omit(unique(clin.data.long$variable[clin.data.long$OORB]))
+# sel.var <- c("ApoB_ApoA1ratio", "BMI", "DiastolicBP_mean", "fPGluk", "fPKol",
+#              "fPKolHDL", "fpKolLDL",  "fPTrigly", "fSLipoA1", "fSLipoB", 
+#              "hsCRP", "KolHDLrat", "PGT", "PULSE_mean", "SD25",
+#              "STSH", "SystolicBP_mean")
+
+new.data <- data.frame(Sex=c(rep("F", 8), rep("M", 8)),
+                       Age=rep(mean(clin.data$Age), 16),
+                       Visit.number=rep((2:5),4),
+                       OORB=rep(c(rep(TRUE, 4), rep(FALSE, 4)),2))
+
+bs.gee <- function(data, formula, newdata, indices) {
+  d <- data[indices,]
+  fit <- geeglm(formula,  id=as.factor(IID) , waves = Visit.number,
+                family = "gaussian", corstr = "exchangeable",
+                std.err = "san.se", data=d)
+  predict <- predict(fit, newdata, type="response")
+  return(predict)
+}
+
+list.gee.p <- vector("list",length(list.gee))
+names(list.gee.p) <- names(list.gee)
+
+for(var in names(list.gee)){
+
+results <- boot(data = list.gee[[var]]$data,
+                formula = list.gee[[var]]$formula,
+                statistic=bs.gee, R=1000, newdata=new.data,
+                parallel = "multicore",  ncpus = 36)
+
+
+new.data$predict <- predict(list.gee[[var]], newdata=new.data, type="response")
+new.data$lwr <- NA
+new.data$upr <- NA
+new.data$ref_low <- NA
+new.data$ref_high <- NA
+
+# get 95% confidence intervals and reference values
+for(i in 1:nrow(new.data)){ try({
+  new.data$lwr[i] <- boot.ci(results, type="bca", index=i)$bca[1,4]
+  new.data$upr[i] <- boot.ci(results, type="bca", index=i)$bca[1,5]
+  new.data$ref_low[i] <- ifelse(new.data$Sex[i]=="F",
+                                ref.val$ref_low_F[match(var, ref.val$feature.ID)],
+                                ref.val$ref_low_M[match(var, ref.val$feature.ID)])
+  new.data$ref_high[i] <- ifelse(new.data$Sex[i]=="F",
+                                 ref.val$ref_high_F[match(var, ref.val$feature.ID)],
+                                 ref.val$ref_high_M[match(var, ref.val$feature.ID)])
+})
+  
+}
+
+
+list.gee.p[[var]] <- ggplot(new.data, aes(x=Visit.number, y=predict, group=factor(OORB, levels=c(TRUE, FALSE))))+
+  geom_ribbon(aes(ymin=lwr, ymax=upr, fill=factor(OORB, levels=c(TRUE, FALSE))), alpha=0.2)+
+  geom_line(aes(col=factor(OORB, levels=c(TRUE, FALSE))), lwd=2)+
+  geom_hline(aes( yintercept= ref_low), lty=2) +
+  geom_hline(aes(  yintercept= ref_high), lty=3) +
+  facet_wrap(~Sex)+
+  ggtitle(var)+
+  scale_color_discrete(name="OORB")+
+  scale_fill_discrete(name="OORB")+
+  theme_bw()
+print(list.gee.p[[var]])
+
+}
+
+
+```
+
+## Fit Linear Mixed Model
+
+```{r}
+list.lmm <- list()
+var <- unique(clin.data.long$variable)
+for(i in 1:length(var)){
+  
+  # if no OOR at baseline or all OOR is NA
+  if(all(!clin.data.long$OORB[clin.data.long$variable==var[i]]) |
+     all(is.na(clin.data.long$OOR[clin.data.long$variable==var[i]]))) {
+    
+    data.tmp <- clin.data.long[clin.data.long$variable==var[i] & !is.na(clin.data.long$value),]
+    data.tmp <- droplevels(data.tmp)
+    data.tmp <- as.data.frame(data.tmp)
+    
+    list.lmm[[i]]<- lmer(value ~ Sex + Age + I(Visit.number-2) + (1 | IID),
+                         data = data.tmp)
+    
+  } else {
+    
+    data.tmp <- clin.data.long[clin.data.long$variable==var[i] & !is.na(clin.data.long$value) & !is.na(clin.data.long$OORB),]
+    data.tmp <- droplevels(data.tmp)
+    data.tmp <- as.data.frame(data.tmp)
+    
+    # if OORB=T for >= 3 IID
+    if(length(unique(data.tmp$IID[data.tmp$OORB]))>=5) {
+      list.lmm[[i]] <- lmer(value ~ Sex + Age + I(Visit.number-2)*OORB + (1 | IID),
+                          data = data.tmp)
+    } else {
+      list.lmm[[i]] <- lmer(value ~ Sex + Age + I(Visit.number-2) + (1 | IID),
+                         data = data.tmp)
+    }
+  }
+  
+  rm(data.tmp)
+}
+
+names(list.lmm) <-  var
+
+
+
+summary.lmm <- list()
+for(i in 1:length(list.lmm)) {
+  summary.lmm[[i]] <- summary(list.lmm[[i]])
+}
+names(summary.lmm) <- var
+
+anova.lmm <- list()
+for(i in 1:length(list.lmm)) {
+  anova.lmm[[i]] <- Anova(list.lmm[[i]], test="F")
+}
+names(anova.lmm) <- var
+
+```
+
+Test the marginal effect of `Visit.number`, as  a linear combination of `Visit.number` and `OORB`, if the interaction term was included.
+
+```{r}
+get.eff <- function(x) {
+  if(ncol(coefficients(x)$IID)==4) {
+    res <- esticon(x, c(0,0,0,1))
+    type <- "All"
+  } else {
+    res <- esticon(x, c(0,0,0,1,0,1))
+    type <- "OORB"
+  }
+  
+  n <- length(unique(x@frame$IID[x@frame$OORB]))
+  
+  return(c(res,type=type, n_OORB=n))
+}
+
+effect.m.lmm <- sapply(list.lmm, get.eff)
+effect.df.lmm <- as.data.frame(t(effect.m.lmm))
+effect.df.lmm$FDR <- p.adjust(effect.df.lmm[,"Pr(>|X^2|)"], method = "fdr")
+
+DT::datatable(effect.df.lmm, options = list(scrollX=T))
+```
+
+Save
+
+```{r}
+save.image("/home/francesco.marabita/Projects/DHR/out/DHR_biometrics_GEE_v04.RData")
+```
+

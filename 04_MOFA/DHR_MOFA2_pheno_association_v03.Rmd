@@ -1,0 +1,912 @@
+---
+title: "DHR association between MOFA2 factors and phenotypic variables v03"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+The main difference with v02:
+
+* I do not consider the phenotypic clusters and groups in the analysis
+* I fit a linear mixed model for each test as well
+
+```{r}
+require(MOFA2)
+require(heatmaply)
+require(pheatmap)
+require(RColorBrewer)
+require(lubridate)
+require(igraph)
+require(ggraph)
+require(lme4)
+require(car)
+require(tidyverse)
+```
+
+# Load data
+
+```{r}
+load("/home/francesco.marabita/Projects/DHR/out/MOFA2_v02/DHR_MOFA2_v02_factors.RData")
+load("/home/francesco.marabita/Projects/DHR/out/pheno_preproc_v03/DHR_pheno_preproc_v03.RData")
+openxlsx::read.xlsx("~/Projects/DHR/data/Clinical/Variables_names_final.xlsx") %>% 
+  type_convert() -> var.lab
+load("/home/francesco.marabita/Projects/DHR/data/Clinical/Clin_data_2018-10-09_newVarNames.RData")
+```
+
+# Associations
+
+## Questionnaire
+
+```{r}
+q.pval <- matrix(NA,
+                 nrow = length(unique(v1to5.noText$question_ID)),
+                 ncol= ncol(mofa.factors),
+                 dimnames = list(unique(v1to5.noText$question_ID), colnames(mofa.factors)))
+
+q.rsq <- q.pval
+q.plme <- q.pval
+
+
+for(i in 1:nrow(q.pval)){
+  for(j in 1:ncol(mofa.factors)){
+    data1 <- as.data.frame(mofa.factors[,j, drop=F])
+    data1$ID <- rownames(data1)
+    data1$IID <- clin.data$IID[match(data1$ID, clin.data$ID)]
+    data1$Age <- clin.data$Age[match(data1$ID, clin.data$ID)]
+    data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
+    data2 <- v1to5.noText[v1to5.noText$question_ID==rownames(q.pval)[i],]
+    data12 <- merge(data1, data2, by="ID", sort=F)
+    
+    if(unique(data12$Type)=="ARRAY") {
+      # if data if of type "ARRAY", value will be factor
+      data12$value <- as.factor(data12$value)
+      f.lev <- table(data12$value)
+      lev.out <- names(f.lev)[f.lev<2]
+      data12 <- data12[!data12$value %in% lev.out,]
+      data12$value <-droplevels(data12$value)
+      
+    } else if(unique(data12$Type)=="ENUM") {
+      # if data if of type "ENUM", value will be ordered factor
+      data12$value <- as.ordered(data12$value)
+      f.lev <- table(data12$value)
+      lev.out <- names(f.lev)[f.lev<2]
+      data12 <- data12[!data12$value %in% lev.out,]
+      data12$value <-droplevels(data12$value)
+      
+    } else if(unique(data12$Type)=="GROUP") {
+      # if data if of type "GROUP", value will be factor
+      data12$value <- as.factor(data12$value)
+      f.lev <- table(data12$value)
+      lev.out <- names(f.lev)[f.lev<2]
+      data12 <- data12[!data12$value %in% lev.out,]
+      data12$value <- droplevels(data12$value)
+      
+    } else if(unique(data12$Type)=="NUMBER") {
+      # if data if of type "NUMBER", value will be numeric
+      data12$value <- as.numeric(data12$value)
+      
+    } else if(unique(data12$Type)=="TEXT") {
+      if(all(is.na(as.numeric(data12$value)))) {
+        # if data if of type "TEXT", value will be factor if it cannot be converted to numeric
+        data12$value <- as.factor(data12$value)
+        f.lev <- table(data12$value)
+        lev.out <- names(f.lev)[f.lev<2]
+        data12 <- data12[!data12$value %in% lev.out,]
+        data12$value <-droplevels(data12$value)
+      } else if(!is.na(unique(data12$Units))) {
+        # if data if of type "TEXT" and unit is "hours", value will be the number of hours
+        if(unique(data12$Units)=="hours") {
+         data12$value <- as.numeric(as.difftime(data12$value, format = "%H:%M"), units="hours")
+        } else if(unique(data12$Units)=="years") {
+          # if data if of type "TEXT" and unit is "years", value will be the number of years
+          data12$value <- as.numeric(data12$value)
+        } else if(unique(data12$Units)=="time") {
+          # if data if of type "TEXT" and unit is "time", value will be the time difference with 00:00
+
+          if(unique(data12$question_ID)=="DHR10-111A" | unique(data12$question_ID)=="DHR10-111B"){
+            # for sleep time, add 12h if 6:00 < time < 12:00 (the original data could be 12h-based)
+            # for sleep time, add 24h if time <6:00
+            timedate <- strptime(data12$value, format="%H:%M")
+            timedate <- as.POSIXct(timedate)
+            for(i in 1:length(timedate)){
+              if(hour(timedate[i])<12 & hour(timedate[i])>6 & !is.na(timedate[i])) {
+                timedate[i] <- timedate[i] + hm("12:00")
+              }
+              if(hour(timedate[i])<6 & !is.na(timedate[i])) {
+                timedate[i] <- timedate[i] + hm("24:00")
+              }  
+            }
+        data12$value <- as.numeric(timedate - as.POSIXct(strptime(rep("00:00", length(timedate)), format="%H:%M")), units="hours")
+            
+          } else if(unique(data12$question_ID)=="DHR10-112A" | unique(data12$question_ID)=="DHR10-112B"){
+            
+            timedate <- strptime(data12$value, format="%H:%M")
+            timedate <- as.POSIXct(timedate)
+            
+        data12$value <- as.numeric(timedate - as.POSIXct(strptime(rep("00:00", length(timedate)), format="%H:%M")), units="hours")
+            
+          }
+        }
+      } else {
+      # if data if of type "TEXT", value will be factor if it can be converted to numeric
+      data12$value <- as.numeric(data12$value)
+      }
+      
+    }
+    
+    # do the test if the number of unique values is at least 2
+    if(length(unique(na.omit(data12$value)))>=2){
+      data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
+      data.anova <- anova(data.lm)
+      if(data.anova$Df[length(data.anova$Df)]==0) {
+        # avoid perfect fit
+        q.pval[i,j] <- NA
+        q.rsq[i,j] <- NA
+        q.plme[i,j] <- NA
+      } else {
+        q.pval[i,j] <- data.anova$`Pr(>F)`[1]
+        q.rsq[i,j] <- summary(data.lm)$r.squared
+        # fit mixed model only if there are less IID than observations (ID) and if at least 5 IID
+        if(length(unique(na.omit(data12$IID[!is.na(data12$value)])))<length(unique(na.omit(data12$ID[!is.na(data12$value)]))) &
+           length(unique(na.omit(data12$IID[!is.na(data12$value)])))>=5){
+          data.lme <-  lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value  + (1 | IID), data=data12)
+          data.anova.lme <- Anova(data.lme, test="F")
+          q.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+        } else {
+          q.plme[i,j] <- NA
+        }
+      }
+    } else {
+      q.pval[i,j] <- NA
+      q.rsq[i,j] <- NA
+      q.plme[i,j] <- NA
+    }
+  }
+}
+
+```
+
+# Healthy Food Index Intake
+
+```{r}
+hfii.l %>%
+  mutate(component=substr(key,4,nchar(key))) %>% 
+  select(c("ID", "component", "value")) -> hfii.l
+
+# hfii.pval <- vector(length = ncol(mofa.factors))
+# names(hfii.pval) <- colnames(mofa.factors)
+
+hfii.pval <- matrix(NA,
+                    nrow = length(unique(hfii.l$component)),
+                    ncol= ncol(mofa.factors),
+                    dimnames = list(unique(hfii.l$component), colnames(mofa.factors)))
+hfii.rsq <- hfii.pval
+hfii.plme <- hfii.pval
+
+
+for(i in 1:nrow(hfii.pval)){
+  for(j in 1:ncol(mofa.factors)){
+    data1 <- as.data.frame(mofa.factors[,j, drop=F])
+    data1$ID <- rownames(data1)
+    data1$IID <- clin.data$IID[match(data1$ID, clin.data$ID)]
+    data1$Age <- clin.data$Age[match(data1$ID, clin.data$ID)]
+    data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
+    data2 <- hfii.l[hfii.l$component==rownames(hfii.pval)[i],]
+    data12 <- merge(data1, data2, by="ID", sort=F)
+    data.lm <- lm(get(colnames(mofa.factors)[j]) ~ as.ordered(as.numeric(value)), data=data12)
+    data.lme <-  lmer(get(colnames(mofa.factors)[j]) ~  Age + Sex + as.ordered(as.numeric(value)) + (1 | IID), data=data12)
+    data.anova <- anova(data.lm)
+    data.anova.lme <- Anova(data.lme, test="F")
+    hfii.pval[i,j] <- data.anova$`Pr(>F)`[1]
+    hfii.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    hfii.rsq[i,j] <- summary(data.lm)$r.squared
+  }
+}
+```
+
+## Clinical variables
+
+```{r}
+sel.var <- c("ID", "Age","Sex", "SystolicBP_mean", "DiastolicBP_mean", "PULSE_mean",
+              "BMI", "MCV", "MCH", "fBLeuk", "BHb", "ERDW", "BHKR","BTrom",
+             "BEryt", "STSH", "SD25", "hsCRP", "PGT", "fPGluk", "SInsu",
+             "fPTrigly", "fPKol", "fPKolHDL", "fpKolLDL", "KolHDLrat", 
+             "fSLipoA1","fSLipoB", "ApoB_ApoA1ratio",
+             "HOMA_IR", "WHR")
+
+clin.data %>%
+  mutate(WHR=Waist/Hip, HOMA_IR=(SInsu*fPGluk)/22.5) %>%
+  select(-c(Waist, Hip, Height, Weight)) %>% 
+  select(all_of(sel.var)) %>%
+  column_to_rownames(var="ID") -> clin.data.sel
+
+clin.pval <- matrix(NA,
+                    nrow = ncol(clin.data.sel),
+                    ncol= ncol(mofa.factors),
+                    dimnames = list(colnames(clin.data.sel), colnames(mofa.factors)))
+clin.rsq <- clin.pval
+clin.plme <- clin.pval
+
+for(i in 1:nrow(clin.pval)){
+  for(j in 1:ncol(mofa.factors)){
+    data1 <- as.data.frame(mofa.factors[,j, drop=F])
+    data1$ID <- rownames(data1)
+    data1$IID <- clin.data$IID[match(data1$ID, clin.data$ID)]
+    data1$Age <- clin.data$Age[match(data1$ID, clin.data$ID)]
+    data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
+    data2 <- clin.data.sel[,i, drop=F]
+    data2$ID <- rownames(data2)
+    data12 <- merge(data1, data2, sort=F)
+    data.lm <- lm(get(colnames(mofa.factors)[j]) ~ get(colnames(clin.data.sel)[i]), data=data12)
+    data.anova <- anova(data.lm)
+    clin.pval[i,j] <- data.anova$`Pr(>F)`[1]
+    clin.rsq[i,j] <- summary(data.lm)$r.squared
+    if(!any(colnames(clin.data.sel)[i] %in% c("Age", "Sex"))){
+      data.lme <-  lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + get(colnames(clin.data.sel)[i]) +  (1 | IID), data=data12)
+      data.anova.lme <- Anova(data.lme, test="F")
+      clin.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    } else {
+      clin.plme[i,j] <- NA
+    }
+  }
+}
+```
+
+## Kardiokompassi
+
+```{r}
+kk.df <- read.table("/home/francesco.marabita/Projects/DHR/data/Other/KardioKompassi_results_20181030_132244.txt", header=T, sep="\t")
+
+kk.df %>%
+  rename(ID=subject) %>%
+  select(c("ID", "trad_risk", "grs_risk", "genrisk_chd")) %>% 
+  gather(key="component", value="value", -ID) -> kk.l
+
+kk.pval <- matrix(NA,
+                  nrow = length(unique(kk.l$component)),
+                  ncol= ncol(mofa.factors),
+                  dimnames = list(unique(kk.l$component), colnames(mofa.factors)))
+kk.rsq <- kk.pval
+kk.plme <- kk.pval
+
+for(i in 1:nrow(kk.pval)){
+  for(j in 1:ncol(mofa.factors)){
+    data1 <- as.data.frame(mofa.factors[,j, drop=F])
+    data1$ID <- rownames(data1)
+    data1$IID <- clin.data$IID[match(data1$ID, clin.data$ID)]
+    data1$Age <- clin.data$Age[match(data1$ID, clin.data$ID)]
+    data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
+    data1$Visit.number <- clin.data$Visit.number[match(data1$ID, clin.data$ID)]
+    data2 <- kk.l[kk.l$component==rownames(kk.pval)[i],]
+    data12 <- merge(data1, data2, by="ID", sort=F)
+    if(rownames(kk.pval)[i]=="genrisk_chd"){
+      data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12[data12$Visit.number==1,])
+      data.anova <- anova(data.lm)
+      kk.pval[i,j] <- data.anova$`Pr(>F)`[1]
+      kk.rsq[i,j] <- summary(data.lm)$r.squared
+      kk.plme[i,j] <- NA
+    }
+    data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
+    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value +  (1 | IID), data=data12)
+    data.anova <- anova(data.lm)
+    data.anova.lme <- Anova(data.lme, test="F")
+    kk.pval[i,j] <- data.anova$`Pr(>F)`[1]
+    kk.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    kk.rsq[i,j] <- summary(data.lm)$r.squared
+  }
+}
+```
+
+## Sleep apnea score
+
+```{r}
+a.score.pval <- matrix(NA,
+                       nrow = 1,
+                       ncol= ncol(mofa.factors),
+                       dimnames = list("a.score", colnames(mofa.factors)))
+
+a.score.rsq <- a.score.pval
+a.score.plme <- a.score.pval
+
+for(j in 1:ncol(mofa.factors)){
+  data1 <- as.data.frame(mofa.factors[,j, drop=F])
+  data1$ID <- rownames(data1)
+  data1$IID <- clin.data$IID[match(data1$ID, clin.data$ID)]
+  data1$Age <- clin.data$Age[match(data1$ID, clin.data$ID)]
+  data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
+  data12 <- merge(data1, a.score, by="ID", sort=F)
+  data.lm <- lm(get(colnames(mofa.factors)[j]) ~ apnea_score, data=data12)
+  data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + apnea_score +  (1 | IID), data=data12)
+  data.anova <- anova(data.lm)
+  data.anova.lme <- Anova(data.lme, test="F")
+  a.score.pval[1,j] <- data.anova$`Pr(>F)`[1]
+  a.score.plme[1,j] <- data.anova.lme$`Pr(>F)`[3]
+  a.score.rsq[1,j] <- summary(data.lm)$r.squared
+}
+```
+
+## Stress score
+
+```{r}
+
+s.score %>% 
+  gather(key="component", value="value", -ID) -> s.score.l
+
+
+s.score.pval <- matrix(NA,
+                    nrow = length(unique(s.score.l$component)),
+                    ncol= ncol(mofa.factors),
+                    dimnames = list(unique(s.score.l$component), colnames(mofa.factors)))
+s.score.rsq <- s.score.pval
+s.score.plme <- s.score.pval
+
+for(i in 1:nrow(s.score.pval)){
+  for(j in 1:ncol(mofa.factors)){
+    data1 <- as.data.frame(mofa.factors[,j, drop=F])
+    data1$ID <- rownames(data1)
+    data1$IID <- clin.data$IID[match(data1$ID, clin.data$ID)]
+    data1$Age <- clin.data$Age[match(data1$ID, clin.data$ID)]
+    data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
+    data2 <- s.score.l[s.score.l$component==rownames(s.score.pval)[i],]
+    data12 <- merge(data1, data2, by="ID", sort=F)
+    data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
+    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~  Age + Sex + value + (1 | IID), data=data12)
+    data.anova <- anova(data.lm)
+    data.anova.lme <- Anova(data.lme, test="F")
+    s.score.pval[i,j] <- data.anova$`Pr(>F)`[1]
+    s.score.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    s.score.rsq[i,j] <- summary(data.lm)$r.squared
+  }
+}
+```
+
+## Fitness tests
+
+```{r}
+f.pval <- matrix(NA,
+                 nrow = length(unique(f1to5.l$component)),
+                 ncol= ncol(mofa.factors),
+                 dimnames = list(unique(f1to5.l$component), colnames(mofa.factors)))
+f.rsq <- f.pval
+f.plme <- f.pval
+
+for(i in 1:nrow(f.pval)){
+  for(j in 1:ncol(mofa.factors)){
+    data1 <- as.data.frame(mofa.factors[,j, drop=F])
+    data1$ID <- rownames(data1)
+    data1$IID <- clin.data$IID[match(data1$ID, clin.data$ID)]
+    data1$Age <- clin.data$Age[match(data1$ID, clin.data$ID)]
+    data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
+    data2 <- f1to5.l[f1to5.l$component==rownames(f.pval)[i],]
+    data12 <- merge(data1, data2, by="ID", sort=F)
+    data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
+    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value +  (1 | IID), data=data12)
+    data.anova <- anova(data.lm)
+    data.anova.lme <- Anova(data.lme, test="F")
+    f.pval[i,j] <- data.anova$`Pr(>F)`[1]
+    f.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    f.rsq[i,j] <- summary(data.lm)$r.squared
+  }
+}
+```
+
+## Sleep and activities
+
+```{r}
+load("/home/francesco.marabita/Projects/DHR/data/Other/Withings/Withings_summaries.RData")
+
+sleep.df %>% 
+  left_join(clin.data[,c("ID","IID", "Visit.number")]) %>% 
+  filter(value!="NaN", n.obs>10) -> sleep.df
+
+activity.df %>% 
+  left_join(clin.data[,c("ID","IID", "Visit.number")]) %>% 
+  filter(value!="NaN", n.obs>10) -> activity.df
+
+sleep.pval <- matrix(NA,
+                     nrow = length(unique(sleep.df$type)),
+                     ncol= ncol(mofa.factors),
+                     dimnames = list(unique(sleep.df$type), colnames(mofa.factors)))
+sleep.rsq <- sleep.pval
+sleep.plme <- sleep.pval
+
+for(i in 1:nrow(sleep.pval)){
+  for(j in 1:ncol(mofa.factors)){
+    data1 <- as.data.frame(mofa.factors[,j, drop=F])
+    data1$ID <- rownames(data1)
+    #data1$IID <- clin.data$IID[match(data1$ID, clin.data$ID)]
+    data1$Age <- clin.data$Age[match(data1$ID, clin.data$ID)]
+    data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
+    data2 <- sleep.df[sleep.df$type==rownames(sleep.pval)[i],]
+    data12 <- merge(data1, data2, by="ID", sort=F)
+    data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
+    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value + (1 | IID), data=data12)
+    data.anova <- anova(data.lm)
+    data.anova.lme <- Anova(data.lme, test="F")
+    sleep.pval[i,j] <- data.anova$`Pr(>F)`[1]
+    sleep.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    sleep.rsq[i,j] <- summary(data.lm)$r.squared
+  }
+}
+
+activity.pval <- matrix(NA,
+                     nrow = length(unique(activity.df$type)),
+                     ncol= ncol(mofa.factors),
+                     dimnames = list(unique(activity.df$type), colnames(mofa.factors)))
+activity.rsq <- activity.pval
+activity.plme <- activity.pval
+
+for(i in 1:nrow(activity.pval)){
+  for(j in 1:ncol(mofa.factors)){
+    data1 <- as.data.frame(mofa.factors[,j, drop=F])
+    data1$ID <- rownames(data1)
+    #data1$IID <- clin.data$IID[match(data1$ID, clin.data$ID)]
+    data1$Age <- clin.data$Age[match(data1$ID, clin.data$ID)]
+    data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
+    data2 <- activity.df[activity.df$type==rownames(activity.pval)[i],]
+    data12 <- merge(data1, data2, by="ID", sort=F)
+    data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
+    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value + (1 | IID), data=data12)
+    data.anova <- anova(data.lm)
+    data.anova.lme <- Anova(data.lme, test="F")
+    activity.pval[i,j] <- data.anova$`Pr(>F)`[1]
+    activity.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    activity.rsq[i,j] <- summary(data.lm)$r.squared
+  }
+}
+
+```
+
+
+# Heatmaps
+
+Create matrix of P values and then calculate FDR
+
+```{r}
+pval.m <- rbind(q.pval, clin.pval, hfii.pval, kk.pval, a.score.pval, s.score.pval, f.pval, sleep.pval, activity.pval)
+pval.m <- pval.m[!rowSums(is.na(pval.m))==ncol(pval.m),]
+
+pval.m %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="question_ID") %>% 
+  gather(key="factor", value = "p.val", -question_ID) %>% 
+  mutate(name=sel.conv$Name[match(question_ID, sel.conv$ID2)]) -> pval.df.l
+
+plme.m <- rbind(q.plme, clin.plme, hfii.plme, kk.plme, a.score.plme, s.score.plme, f.plme, sleep.plme, activity.plme)
+plme.m <- plme.m[rownames(pval.m),]
+plme.m %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="question_ID") %>% 
+  gather(key="factor", value = "p.lme", -question_ID) %>% 
+  mutate(name=sel.conv$Name[match(question_ID, sel.conv$ID2)]) -> plme.df.l
+
+pval.m %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="question_ID") %>% 
+  gather(key="factor", value = "p.val", -question_ID) %>% 
+  mutate(FDR=p.adjust(p.val,method = "fdr")) %>% 
+  select(question_ID, factor, FDR) %>% 
+  spread(factor, FDR) %>% 
+  column_to_rownames("question_ID") %>% 
+  as.matrix() -> fdr.m
+
+fdr.m %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="question_ID") %>% 
+  gather(key="factor", value = "fdr", -question_ID) %>% 
+  mutate(name=sel.conv$Name[match(question_ID, sel.conv$ID2)]) -> fdr.df.l
+
+rsq.m <- rbind(q.rsq, clin.rsq, hfii.rsq, kk.rsq, a.score.rsq, s.score.rsq, f.rsq, sleep.rsq, activity.rsq)
+rsq.m <- rsq.m[rownames(pval.m),]
+
+rsq.m %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="question_ID") %>% 
+  gather(key="factor", value = "rsq", -question_ID) %>% 
+  mutate(name=sel.conv$Name[match(question_ID, sel.conv$ID2)]) -> rsq.df.l
+```
+
+Select features if at least one test has FDR>0.05. Then plot a heatmap with annotation, ordered by feature type or clustered.
+
+```{r heatmap, fig.height=20, fig.width=10}
+toPlot <- -log10(fdr.m[rowSums(fdr.m>0.05)!=ncol(fdr.m),])
+for(i in 1:nrow(toPlot)){
+  if(grepl("^DHR", rownames(toPlot)[i])){
+    rownames(toPlot)[i] <- paste0(rownames(toPlot)[i],"_", sel.conv$Name[match(rownames(toPlot)[i],sel.conv$ID2)])
+  }
+}
+
+annot.row.df <- data.frame(row.names = rownames(toPlot),
+                           type=rep(NA, nrow(toPlot)))
+annot.row.df$type <- ifelse(grepl("^DHR", rownames(annot.row.df)), "Questionnaire", "Biometrics")
+annot.row.df$type[rownames(annot.row.df) %in% unique(hfii.l$component)] <- "Other"
+annot.row.df$type[rownames(annot.row.df) %in% unique(kk.l$component)] <- "Other"
+annot.row.df$type[rownames(annot.row.df) %in% unique(s.score.l$component)] <- "Other"
+annot.row.df$type[rownames(annot.row.df) %in% "a.score"] <- "Other"
+annot.row.df$type[rownames(annot.row.df) %in% unique(f1to5.l$component)] <- "Fitness tests"
+annot.row.df$type[rownames(annot.row.df) %in% unique(sleep.df$type)] <- "Activity and sleep"
+annot.row.df$type[rownames(annot.row.df) %in% unique(activity.df$type)] <- "Activity and sleep"
+
+
+
+annot.row.df$subtype <- annot.row.df$type
+for(i in 1:nrow(annot.row.df)){
+  
+  if(grepl("^DHR03", rownames(annot.row.df)[i])) annot.row.df$subtype[i] <- "Family history"
+  else if(grepl("^DHR04", rownames(annot.row.df)[i])) annot.row.df$subtype[i] <- "Exercise"
+  else if(grepl("^DHR05", rownames(annot.row.df)[i])) annot.row.df$subtype[i] <- "Health"
+  else if(grepl("^DHR06", rownames(annot.row.df)[i])) annot.row.df$subtype[i] <- "Mental health"
+  else if(grepl("^DHR07", rownames(annot.row.df)[i])) annot.row.df$subtype[i] <- "Diet"
+  else if(grepl("^DHR08", rownames(annot.row.df)[i])) annot.row.df$subtype[i] <- "Smoking"
+  else if(grepl("^DHR09", rownames(annot.row.df)[i])) annot.row.df$subtype[i] <- "Alcohol"
+  else if(grepl("^DHR10", rownames(annot.row.df)[i])) annot.row.df$subtype[i] <- "Sleep"
+  else if(grepl("Biometrics", annot.row.df$type[i])) annot.row.df$subtype[i] <- var.lab$Area[match(rownames(annot.row.df)[i], var.lab$feature.ID)]
+  
+}
+
+#some adjustments required
+annot.row.df$subtype[annot.row.df$subtype=="Cardiovascular"] <- "Lipids"
+annot.row.df$subtype[rownames(annot.row.df)=="WHR"] <- "Anthropometrics and physiology"
+annot.row.df$subtype[rownames(annot.row.df)=="HOMA_IR"] <- "Organs or metabolism markers"
+
+annot.row.df <- annot.row.df[order(annot.row.df$type),]
+toPlot <- toPlot[rownames(annot.row.df),]
+
+
+
+breaksList <- c(0, 1.30103, 2, 5, 10, 15, 20)
+
+pheatmap(toPlot, scale = "none", cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+         breaks = breaksList, legend_breaks = breaksList, border_color = NA, fontsize_row = 8,
+         annotation_row = annot.row.df[,!colnames(annot.row.df) %in% "subtype", drop=F])
+
+pheatmap(toPlot, scale = "none", cluster_rows = T, cluster_cols = T,
+         color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+         breaks = breaksList, legend_breaks = breaksList, border_color = NA, fontsize_row = 8,
+         annotation_row = annot.row.df[,!colnames(annot.row.df) %in% "subtype", drop=F])
+
+
+
+toPlotly <- toPlot
+toPlotly[toPlotly<1.30103] <- 0
+
+heatmaply(toPlotly, scale = "none", dendrogram = "none", showticklabels = c(T,F), margins = c(20,20,NA,NA),
+          scale_fill_gradient_fun = scale_fill_gradientn(colours = rev(RdYlBu(8)),
+                                                         values=scales::rescale(c(0, 1.30103, 2, 5, 10, 15, 20, max(toPlotly))),
+                                                         breaks=breaksList, labels = format(breaksList, digits = 2)),
+          row_side_colors = annot.row.df)
+
+heatmaply(toPlotly, scale = "none", dendrogram = "both", showticklabels = c(T,F), margins = c(20,20,NA,NA),
+          scale_fill_gradient_fun = scale_fill_gradientn(colours = rev(RdYlBu(8)),
+                                                         values=scales::rescale(c(0, 1.30103, 2, 5, 10, 15, 20, max(toPlotly))),
+                                                         breaks=breaksList, labels = format(breaksList, digits = 2)),
+          row_side_colors = annot.row.df)
+
+```
+
+# Network
+
+Code adapted from https://www.r-graph-gallery.com/311-add-labels-to-hierarchical-edge-bundling.html
+
+```{r}
+# connections at FDR<0.001
+fdr.df.l %>%
+  filter(fdr<0.001) %>% 
+  arrange(fdr) %>% 
+  #head(200) %>% 
+  transmute(from=factor,
+            to=if_else(grepl("^DHR",question_ID), paste0(question_ID, "_", sel.conv$Name[match(question_ID, sel.conv$ID2)]), question_ID),
+            fdr = -log10(fdr)) -> fdr.graph.df
+
+# annotation
+annot.row.df %>%
+  rownames_to_column("name") %>% 
+  filter(name %in% c(fdr.graph.df$from, fdr.graph.df$to)) %>%
+  bind_rows(data.frame(name=paste0("Factor", 1:14),
+                       type=rep("factor", 14),
+                       subtype=rep("factor", 14),
+                       stringsAsFactors = F)) %>% 
+  bind_rows(data.frame(name=c("origin", unique(c(.$type,.$subtype))),
+                       type=NA,
+                       subtype=NA,
+                       stringsAsFactors = F)) %>%
+  arrange(type, subtype) %>% 
+  mutate(name=factor(name)) -> annot.nodes
+
+
+# node hierarchy
+d1 <- data.frame(from="origin",
+                 to=na.omit(unique(annot.nodes$type)),
+                 stringsAsFactors = F)
+d2 <- data.frame(from="Questionnaire",
+                 to=na.omit(unique(annot.nodes$subtype[annot.nodes$type=="Questionnaire"])),
+                 stringsAsFactors = F)
+d3 <- data.frame(from="Biometrics",
+                 to=na.omit(unique(annot.nodes$subtype[annot.nodes$type=="Biometrics"])),
+                 stringsAsFactors = F)
+d4 <- data.frame(from=annot.nodes$subtype[!is.na(annot.nodes$subtype)],
+                 to=annot.nodes$name[!is.na(annot.nodes$subtype)],
+                 stringsAsFactors = F)
+
+fdr.hierarchy <- rbind(d1, d2, d3, d4)
+
+fdr.hier.graph <- graph_from_data_frame(fdr.hierarchy, directed = T, vertices = annot.nodes)
+fdr.graph <- graph_from_data_frame(fdr.graph.df, directed = T, vertices = annot.nodes)
+```
+
+```{r}
+cols <- colorRampPalette(brewer.pal(10, "RdYlBu"))
+myPal <- cols(14)
+
+ggraph(fdr.hier.graph, layout = "dendrogram", circular=T, offset=180) -> p.dend
+
+# fix the angle to draw the labels properly
+p.dend$data$angle <- 90 - atan2(p.dend$data$x, p.dend$data$y)*180/pi 
+p.dend$data$hjust <- ifelse(p.dend$data$angle > 90 & p.dend$data$angle <270, 1, 0)
+p.dend$data$angle <- ifelse(p.dend$data$angle > 90 & p.dend$data$angle <270,  p.dend$data$angle+180, p.dend$data$angle)
+
+# annot.nodes$id=NA
+# myleaves <- which(p.dend$data$leaf[match(annot.nodes$name, p.dend$data$name)])
+# 
+# annot.nodes$id[ myleaves ] <- seq(1:length(myleaves))
+# annot.nodes$angle <- 90 - 360 * annot.nodes$id / length(myleaves) - 120
+# annot.nodes$hjust <- ifelse(annot.nodes$angle < -90 & annot.nodes$angle < -270, 1, 0)
+# annot.nodes$angle <- ifelse(annot.nodes$angle < -90 & annot.nodes$angle < -270, annot.nodes$angle+180, annot.nodes$angle)
+
+p.dend + geom_edge_link()+
+  geom_node_point(aes(filter=leaf), alpha=0.3) +
+  geom_node_text(aes(label=name, filter=!leaf), angle=0, hjust=0, size=2)
+
+p.dend + geom_conn_bundle(data = get_con(from=match(fdr.graph.df$from, annot.nodes$name),
+                                    to=match(fdr.graph.df$to, annot.nodes$name) ,
+                                    fdr=fdr.graph.df$fdr),
+                     aes(col=name), alpha=0.7, tension=0.9, width=1, show.legend = F) +
+  geom_node_point(aes(filter=leaf), alpha=0.3) +
+  geom_node_text(aes( x*1.03, y=y*1.03,  label=name, filter=name %in% paste0("Factor",1:14), angle=angle, hjust=hjust), size=2)+
+  scale_edge_color_manual(values = myPal, limits=paste0("Factor", 1:14)) +
+  coord_fixed() +
+  theme_void() +
+  theme(plot.margin=unit(c(0,0,0,0),"cm")) +
+  expand_limits(x = c(-1.2, 1.2), y = c(-1.2, 1.2))
+
+p.dend + geom_conn_bundle(data = get_con(from=match(fdr.graph.df$from, annot.nodes$name),
+                                    to=match(fdr.graph.df$to, annot.nodes$name) ,
+                                    fdr=fdr.graph.df$fdr),
+                     aes(col=name), alpha=0.7, tension=0.9, width=1, show.legend = F) +
+  geom_node_point(aes(filter=leaf), alpha=0.3) +
+  geom_node_text(aes(label=name, filter=!leaf & !name %in% "origin"), hjust=0.5, size=2)+
+  geom_node_text(aes( x*1.03, y=y*1.03, label=name, filter=name %in% paste0("Factor",1:14), angle=angle, hjust=hjust), size=2)+
+  scale_edge_color_manual(values = myPal, limits=paste0("Factor", 1:14)) +
+  coord_fixed() +
+  theme_void() +
+  theme(plot.margin=unit(c(0,0,0,0),"cm")) +
+  expand_limits(x = c(-1.2, 1.2), y = c(-1.2, 1.2))
+
+
+p.dend + geom_conn_bundle(data = get_con(from=match(fdr.graph.df$from, annot.nodes$name),
+                                    to=match(fdr.graph.df$to, annot.nodes$name) ,
+                                    fdr=fdr.graph.df$fdr),
+                     aes(col=name), alpha=0.7, tension=0.9, width=1, show.legend = F) +
+  geom_node_point(aes(filter=leaf), alpha=0.3) +
+  geom_node_text(aes( x*1.03, y=y*1.03,  label=name, filter=leaf, angle=angle, hjust=hjust), size=2)+
+  scale_edge_color_manual(values = myPal, limits=paste0("Factor", 1:14)) +
+  coord_fixed() +
+  theme_void() +
+  theme(plot.margin=unit(c(0,0,0,0),"cm")) +
+  expand_limits(x = c(-1.2, 1.2), y = c(-1.2, 1.2))
+
+```
+
+```{r}
+for(i in paste0("Factor", c(1,2,3,4,5,6,7,8,9,11,12,14))){
+  p.dend + geom_conn_bundle(data = get_con(from=match(fdr.graph.df$from[fdr.graph.df$from==i], annot.nodes$name),
+                                      to=match(fdr.graph.df$to[fdr.graph.df$from==i], annot.nodes$name) ,
+                                      fdr=fdr.graph.df$fdr[fdr.graph.df$from==i]),
+                       aes(col=name), alpha=0.7, tension=0.9, width=1, show.legend = F) +
+    geom_node_point(aes(filter=leaf), alpha=0.3) +
+    geom_node_text(aes( x*1.03, y=y*1.03,  label=name, filter=name %in% i, angle=angle, hjust=hjust), size=2)+
+    scale_edge_color_manual(values = myPal, limits=paste0("Factor", 1:14)) +
+    coord_fixed() +
+    theme_void() +
+    theme(plot.margin=unit(c(0,0,0,0),"cm")) +
+    expand_limits(x = c(-1.2, 1.2), y = c(-1.2, 1.2)) -> p
+  print(p)
+}
+```
+
+# Plots
+
+## Boxplots for questionnaire data
+
+```{r barplots, fig.width=10, fig.height=10}
+
+for(f in sort(unique(fdr.df.l$factor))){
+  try({sel.assoc <- subset(fdr.df.l,factor==f&fdr<0.05&grepl("^DHR",question_ID))
+  data1 <- v1to5.noText[v1to5.noText$question_ID %in% sel.assoc$question_ID,]
+  data2 <- as.data.frame(mofa.factors[,f, drop=F])
+  data2$ID <- rownames(data2)
+  data12 <-  merge(data1, data2, by="ID", sort=F)
+  data12$name <- sel.conv$Name[match(data12$question_ID, sel.conv$ID2)]
+
+  if(all(is.na(as.numeric(data12$value)))) {
+    data12$value <- as.factor(data12$value)
+  } else { data12$value <- ordered(data12$value) }
+
+  p <- ggplot(data12, aes_string("value", f)) +
+    geom_boxplot()+
+    facet_wrap(~ question_ID + name, scale="free", labeller = label_wrap_gen(multi_line = F))
+  
+  print(p)
+  }
+  )
+}
+
+```
+
+## Scaterplots for clinical data
+
+```{r scatterplot, fig.width=10, fig.height=10}
+
+for(f in sort(unique(fdr.df.l$factor))){ 
+  try({sel.assoc <- subset(fdr.df.l,factor==f & fdr<0.05 & !grepl("^DHR",question_ID))
+  data1 <- clin.data.sel[,colnames(clin.data.sel) %in% sel.assoc$question_ID, drop=F]
+  data2 <- as.data.frame(mofa.factors[,f, drop=F])
+  data2$ID <- rownames(data2)
+  data12 <-  merge(data1, data2, by.x="row.names", by.y="ID", sort=F)
+  data12.l <- gather(data12, key="question_ID", value="value", -c(Row.names, !!f))
+  data12.l$value <- as.numeric(as.character(data12.l$value))
+  p <- ggplot(data12.l, aes_string("value", f)) +
+    geom_point() +
+    geom_smooth(method = "lm") +
+    facet_wrap(~ question_ID, scale="free")
+  print(p)
+  }
+  )
+}
+
+```
+
+## Boxplots for HFII
+
+```{r}
+
+for(f in sort(unique(fdr.df.l$factor))){ 
+  try({sel.assoc <- subset(fdr.df.l,factor==f & fdr<0.05 & !grepl("^DHR",question_ID))
+  data1 <- hfii.l[hfii.l$component %in% sel.assoc$question_ID,]
+  data1 <- spread(data1,key = "component", value="value")
+  data2 <- as.data.frame(mofa.factors[,f, drop=F])
+  data2$ID <- rownames(data2)
+  data12 <-  merge(data1, data2, by="ID", sort=F)
+  data12.l <- gather(data12, key="question_ID", value="value", -c(ID, !!f))
+  data12.l$value <- as.factor(data12.l$value)
+  p <- ggplot(data12.l, aes_string("value", f)) +
+    geom_boxplot() +
+    facet_wrap(~ question_ID, scale="free")
+  print(p)
+  }
+  )
+}
+
+```
+
+## Scatterplots for sleep apnea
+
+```{r}
+for(f in sort(unique(fdr.df.l$factor))){
+  try({sel.assoc <- subset(fdr.df.l, factor==f & fdr<0.05 & question_ID=="a.score.pval")
+  if(nrow(sel.assoc)>=1) {
+    data2 <- as.data.frame(mofa.factors[,f, drop=F])
+    data2$ID <- rownames(data2)
+    data12 <-  merge(data2, a.score, by="ID", sort=F)
+    data12.l <- gather(data12, key="question_ID", value="value", -c(ID, !!f))
+    data12.l$value <- as.numeric(as.character(data12.l$value))
+    p <- ggplot(data12.l, aes_string("value", f)) +
+      geom_point() +
+      geom_smooth(method = "lm") +
+      facet_wrap(~ question_ID, scale="free")
+    print(p)
+  }
+  }
+  )
+}
+
+```
+
+## Scatterplots for wearables
+
+```{r}
+for(f in sort(unique(fdr.df.l$factor))){ 
+  try({sel.assoc <- subset(fdr.df.l,factor==f & fdr<0.05 & !grepl("^DHR",question_ID))
+  data1 <- sleep.df[sleep.df$type %in% sel.assoc$question_ID,]
+  data1 <- spread(data1,key = "type", value="value")
+  data2 <- as.data.frame(mofa.factors[,f, drop=F])
+  data2$ID <- rownames(data2)
+  data12 <-  merge(data1, data2, by="ID", sort=F)
+  data12 %>% 
+    select(-c(IID, Visit.number,Visit.date, n.obs)) %>% 
+    gather(key="question_ID", value="value", -c(ID, !!f)) -> data12.l
+  data12.l$value <- as.numeric(as.character(data12.l$value))
+  p <- ggplot(data12.l, aes_string("value", f)) +
+    geom_point() +
+    geom_smooth(method = "lm") +
+    facet_wrap(~ question_ID, scale="free")
+  print(p)
+  }
+  )
+}
+
+for(f in sort(unique(fdr.df.l$factor))){ 
+  try({sel.assoc <- subset(fdr.df.l,factor==f & fdr<0.05 & !grepl("^DHR",question_ID))
+  data1 <- activity.df[activity.df$type %in% sel.assoc$question_ID,]
+  data1 <- spread(data1,key = "type", value="value")
+  data2 <- as.data.frame(mofa.factors[,f, drop=F])
+  data2$ID <- rownames(data2)
+  data12 <-  merge(data1, data2, by="ID", sort=F)
+  data12 %>% 
+    select(-c(IID, Visit.number,Visit.date, n.obs)) %>% 
+    gather(key="question_ID", value="value", -c(ID, !!f)) -> data12.l
+  data12.l$value <- as.numeric(as.character(data12.l$value))
+  p <- ggplot(data12.l, aes_string("value", f)) +
+    geom_point() +
+    geom_smooth(method = "lm") +
+    facet_wrap(~ question_ID, scale="free")
+  print(p)
+  }
+  )
+}
+```
+
+## Scatterplots for Kardiokompassi
+```{r}
+for(f in sort(unique(fdr.df.l$factor))){ 
+  try({sel.assoc <- subset(fdr.df.l,factor==f & fdr<0.05 & !grepl("^DHR",question_ID))
+  data1 <- kk.l[kk.l$component %in% sel.assoc$question_ID,]
+  data1 <- spread(data1,key = "component", value="value")
+  data2 <- as.data.frame(mofa.factors[,f, drop=F])
+  data2$ID <- rownames(data2)
+  data12 <-  merge(data1, data2, by="ID", sort=F)
+  data12 %>% 
+    gather(key="question_ID", value="value", -c(ID, !!f)) -> data12.l
+  data12.l$value <- as.numeric(as.character(data12.l$value))
+  p <- ggplot(data12.l, aes_string("value", f)) +
+    geom_point() +
+    geom_smooth(method = "lm") +
+    facet_wrap(~ question_ID, scale="free")
+  print(p)
+  }
+  )
+}
+```
+
+# Linear Mixed Models
+
+Select the associations at FDR<0.001, then fit a linear mixed model to correct for age and sex as fixed effect and the individual as random effect.
+
+```{r}
+pval.df.l %>% 
+  left_join(fdr.df.l) %>% 
+  left_join(plme.df.l) %>% 
+  left_join(rsq.df.l) %>% 
+  arrange(fdr) -> final.df
+
+final.df %>% 
+  filter(fdr<0.001) %>%
+  DT::datatable()
+```
+
+
+
+```{r}
+# save.image("/home/francesco.marabita/Projects/DHR/out/DHR_pheno_MOFA2_v03.RData")
+# write.table(final.df, file = "/home/francesco.marabita/Projects/DHR/out/pheno_MOFA2_assoc_v03.txt", sep="\t", quote = F, row.names = F)
+# write.table(rsq.df.l, file = "/home/francesco.marabita/Projects/DHR/out/pheno_MOFA2_assoc_rsq_v03.txt", sep="\t", quote = F, row.names = F)
+# write.table(fdr.df.l, file = "/home/francesco.marabita/Projects/DHR/out/pheno_MOFA2_assoc_fdr_v03.txt", sep="\t", quote = F, row.names = F)
+```
+

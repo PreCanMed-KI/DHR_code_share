@@ -1,0 +1,239 @@
+---
+title: "DHR process phenotypes for MOFA interpetation v03"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+```{r}
+require(openxlsx)
+require(lubridate)
+require(tidyverse)
+
+load("/home/francesco.marabita/Projects/DHR/data/Clinical/Clin_data_2018-10-09_newVarNames.RData")
+
+outDir <-  "/home/francesco.marabita/Projects/DHR/out/pheno_preproc_v03"
+dir.create(outDir)
+
+```
+
+# Questionnaire
+
+Import the questionaire data and select the question related to:
+
+* Family history
+* Exercise and physical activity
+* Functional capacity and health
+* Mental health
+* Diet
+* Smoking
+* Alcohol use
+* Sleep habits
+
+```{r}
+
+v1 <- read.table("/home/francesco.marabita/Projects/DHR/data/Questionnaire/Code_headers/kyselylomake_1_20181120_145706.txt",
+                 sep="\t", header=T)
+v2 <- read.table("/home/francesco.marabita/Projects/DHR/data/Questionnaire/Code_headers/kyselylomake_2_20181120_150251.txt",
+                 sep="\t", header=T)
+v3 <- read.table("/home/francesco.marabita/Projects/DHR/data/Questionnaire/Code_headers/kyselylomake_3_20181120_150756.txt",
+                 sep="\t", header=T)
+v4 <- read.table("/home/francesco.marabita/Projects/DHR/data/Questionnaire/Code_headers/kyselylomake_4_20181120_151120.txt",
+                 sep="\t", header=T)
+v5 <- read.table("/home/francesco.marabita/Projects/DHR/data/Questionnaire/Code_headers/kyselylomake_5_20181122_103240.txt",
+                 sep="\t", header=T)
+```
+
+The variables may have different IDs between visits. Import lookup table with selected questions.
+
+```{r}
+sel.conv <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Questionnaire/selected_questions_conversion.xlsx")
+sel.conv$ID1 <- gsub("-", ".", sel.conv$ID1)
+sel.conv$ID2 <- gsub("-", ".", sel.conv$ID2)
+sel.conv$ID3 <- gsub("-", ".", sel.conv$ID3)
+sel.conv$ID4 <- gsub("-", ".", sel.conv$ID4)
+sel.conv$ID5 <- gsub("-", ".", sel.conv$ID5)
+```
+
+Select the questions and make long format. 
+
+```{r}
+v1 <- v1[,colnames(v1) %in% c("subject", sel.conv$ID1)]
+v2 <- v2[,colnames(v2) %in% c("subject", sel.conv$ID2)]
+v3 <- v3[,colnames(v3) %in% c("subject", sel.conv$ID3)]
+v4 <- v4[,colnames(v4) %in% c("subject", sel.conv$ID4)]
+v5 <- v5[,colnames(v5) %in% c("subject", sel.conv$ID5)]
+
+v1.l <- gather(v1, key = "question_ID1", value="value", -subject)
+# question ID changed during visit 2:fix it
+
+v1.l$question_ID <- sel.conv$ID2[match(v1.l$question_ID1, sel.conv$ID1)]
+v1.l <- v1.l[,c("subject", "question_ID", "value")]
+v2.l <- gather(v2, key = "question_ID", value="value", -subject)
+v3.l <- gather(v3, key = "question_ID", value="value", -subject)
+v4.l <- gather(v4, key = "question_ID", value="value", -subject)
+v5.l <- gather(v5, key = "question_ID", value="value", -subject)
+
+rbind(v1.l, v2.l, v3.l, v4.l, v5.l) %>% 
+  rename(ID = subject) -> v1to5.l
+```
+
+Add type.
+
+```{r}
+v1to5.l$Type <- sel.conv$Type[match(v1to5.l$question_ID, sel.conv$ID2)]
+v1to5.l$Units <- sel.conv$Units[match(v1to5.l$question_ID, sel.conv$ID2)]
+```
+
+
+Remove the text for each answer and keep the label only.
+
+```{r}
+v1to5.noText <- v1to5.l
+v1to5.noText$value <- gsub(" \\(.*)$", "", v1to5.noText$value)
+```
+
+
+# Healthy Food Intake Index (HFII)
+
+```{r}
+hfii<- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Other/Healthy_Food_Intake_Index_components.xlsx", sheet = 1)
+hfii.l <- gather(hfii, key="key", value="value", -IID)
+hfii.l$name <- paste0(hfii.l$IID,"_", substr(hfii.l$key,2,2))
+
+lookup.id <- clin.data[,c("IID","ID","Visit.number")]
+lookup.id$name <- paste0(lookup.id$IID, "_", lookup.id$Visit.number)
+
+hfii.l$ID <- lookup.id$ID[match(hfii.l$name, lookup.id$name)]
+#hfii.l <- hfii.l[, c("IID","ID","name", "value")]
+hfii.l <- hfii.l[!is.na(hfii.l$ID),]
+```
+
+# Menstrual cycle
+
+```{r}
+m1 <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Other/menstrual_cycle.xlsx", sheet = "v1", detectDates = T )
+m2 <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Other/menstrual_cycle.xlsx", sheet = "v2", detectDates = T )
+m3 <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Other/menstrual_cycle.xlsx", sheet = "v3", detectDates = T )
+m4 <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Other/menstrual_cycle.xlsx", sheet = "v4", detectDates = T )
+m5 <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Other/menstrual_cycle.xlsx", sheet = "v5", detectDates = T )
+
+m1 <- m1[, c("ID", "start_date_menstruation" )]
+m1$note_menstruation <-  ""
+m2 <- m2[, c("ID", "start_date_menstruation", "note_menstruation" )]
+m3 <- m3[, c("ID", "start_date_menstruation", "note_menstruation" )]
+m4 <- m4[, c("ID", "start_date_menstruation", "note_menstruation" )]
+m5 <- m5[, c("ID", "start_date_menstruation", "note_menstruation" )]
+
+m1to5 <- rbind(m1,m2,m3,m4,m5)
+m1to5$IID <- lookup.id$IID[match(m1to5$ID, lookup.id$ID)]
+```
+
+
+# Saliva cortisol
+
+## $$AUC_G$$ and $$AUC_I$$
+
+$$AUC_G = \sum_{i=1}^{n-1} \frac{(m_{i+1} + m_i) \cdot t_i} {2}$$
+$$AUC_I = AUC_G - m_1 \cdot \sum_{i=1}^{n-1}t_i$$
+
+$$`t_i`$$ is the time distance between measurements $$m_{i+1}$$ and $$m_i$$.
+
+```{r}
+s1to5 <- read.table("/home/francesco.marabita/Projects/DHR/data/Other/Saliva_cortisol_processed_2020-02-05.txt",
+                    header = T, sep = "\t", stringsAsFactors = F)
+
+s1to5 %>% 
+  rename(ID=subject) %>% 
+  select(ID,collection_date,procesing_date,
+         C1.1_arvo,C1.1_protocol,C1.1_tstamp,
+         C2.1_arvo,C2.1_protocol,C2.1_tstamp,
+         C3.1_arvo,C3.1_protocol,C3.1_tstamp,
+         C4.1_arvo,C4.1_protocol,C4.1_tstamp,
+         C.any.flag.count, C.interval.flag.count, C.interval.times,
+         comment) %>% 
+  filter(C.any.flag.count==0) -> s1to5
+  
+# convert to times
+s1to5$C1.1_datetime <- as.POSIXct(strptime(paste0(s1to5$collection_date," ",s1to5$C1.1_tstamp), format="%Y-%m-%d %H:%M"))
+s1to5$C2.1_datetime <- as.POSIXct(strptime(paste0(s1to5$collection_date," ",s1to5$C2.1_tstamp), format="%Y-%m-%d %H:%M"))
+s1to5$C3.1_datetime <- as.POSIXct(strptime(paste0(s1to5$collection_date," ",s1to5$C3.1_tstamp), format="%Y-%m-%d %H:%M"))
+s1to5$C4.1_datetime <- as.POSIXct(strptime(paste0(s1to5$collection_date," ",s1to5$C4.1_tstamp), format="%Y-%m-%d %H:%M"))
+
+# if C4 is after midnight, add one day
+s1to5$C4.1_datetime <- if_else((s1to5$C4.1_datetime - s1to5$C1.1_datetime) <= 0,
+                              s1to5$C4.1_datetime +  hm("24:00"),
+                              s1to5$C4.1_datetime)
+
+
+# calculate AUC_G and AUC_I
+s.score <- data.frame(ID=s1to5$ID, AUC.g=NA, AUC.i=NA, C.1=NA, C.4=NA, C.p=NA, C.D=NA)
+for(i in 1:nrow(s1to5)){
+   if(any(is.na(c(s1to5$C1.1_arvo[i], s1to5$C2.1_arvo[i], s1to5$C3.1_arvo[i], s1to5$C4.1_arvo[i])))) {
+    s.score$AUC.g[i] <- NA
+    s.score$AUC.i[i] <- NA
+  } else {
+    s.score$AUC.g[i] <- sum(
+      ((s1to5$C2.1_arvo[i] + s1to5$C1.1_arvo[i])*(as.numeric(difftime(s1to5$C2.1_datetime[i], s1to5$C1.1_datetime[i], units = "mins"))))/2, 
+      ((s1to5$C3.1_arvo[i] + s1to5$C2.1_arvo[i])*(as.numeric(difftime(s1to5$C3.1_datetime[i], s1to5$C2.1_datetime[i], units = "mins"))))/2,
+      ((s1to5$C4.1_arvo[i] + s1to5$C3.1_arvo[i])*(as.numeric(difftime(s1to5$C4.1_datetime[i], s1to5$C3.1_datetime[i], units = "mins"))))/2
+    )
+    s.score$AUC.i[i] <- s.score$AUC.g[i] - s1to5$C1.1_arvo[i]*(as.numeric(difftime(s1to5$C4.1_datetime[i], s1to5$C3.1_datetime[i], units = "mins")))
+  }
+}
+
+```
+
+## Awakening, evening, peak and Delta (peak - ground) levels 
+
+```{r}
+s.score$C.1 <- s1to5$C1.1_arvo
+s.score$C.4 <- s1to5$C4.1_arvo
+s.score$C.p <- pmax(s1to5$C1.1_arvo, s1to5$C2.1_arvo, s1to5$C3.1_arvo, s1to5$C4.1_arvo, na.rm = T)
+s.score$C.D <- pmax(s1to5$C1.1_arvo, s1to5$C2.1_arvo, s1to5$C3.1_arvo, s1to5$C4.1_arvo, na.rm = T) -
+   pmin(s1to5$C1.1_arvo, s1to5$C2.1_arvo, s1to5$C3.1_arvo, s1to5$C4.1_arvo, na.rm = T)
+
+```
+
+
+# Apnea
+```{r}
+a1to5 <- read.xlsx("/home/francesco.marabita/Projects/DHR/data/Other/Selfreported sleep apnea score_DHR_OSA_scores_Q1-Q5.xlsx",
+                   sheet = 1)
+a1to5 <- a1to5[,3:ncol(a1to5)]
+a.score <- as.data.frame(mapply(c, a1to5[,1:2],a1to5[,3:4], a1to5[,5:6], a1to5[,7:8], a1to5[,9:10]))
+colnames(a.score) <- c("ID", "apnea_score")
+```
+
+# Fitness
+
+```{r}
+f1 <- read.table("/home/francesco.marabita/Projects/DHR/data/Other/Fitness/kuntotesti_1_20181120_152601.txt",
+                 sep="\t", header=T)
+f2 <- read.table("/home/francesco.marabita/Projects/DHR/data/Other/Fitness/kuntotesti_2_20181120_152622.txt",
+                 sep="\t", header=T)
+f3 <- read.table("/home/francesco.marabita/Projects/DHR/data/Other/Fitness/kuntotesti_3_20181120_152652.txt",
+                 sep="\t", header=T)
+f4 <- read.table("/home/francesco.marabita/Projects/DHR/data/Other/Fitness/kuntotesti_4_20181120_152739.txt",
+                 sep="\t", header=T)
+f5 <- read.table("/home/francesco.marabita/Projects/DHR/data/Other/Fitness/kuntotesti_5_20181120_152815.txt",
+                 sep="\t", header=T)
+f1to5 <- rbind(f1,f2,f3,f4,f5)
+colnames(f1to5) <- c("ID", "state", "timestamp", "central_body", "mobility", "balance", "lower_body", "upper_body")
+f1to5 %>% 
+  select(-state, -timestamp) %>% 
+  gather(key="component", value = "value", -ID) -> f1to5.l
+
+```
+
+
+```{r}
+save(sel.conv, v1to5.l, v1to5.noText, hfii.l, m1to5, s.score, a.score, f1to5.l, file=paste0(outDir,"/DHR_pheno_preproc_v03.RData"))
+```
+

@@ -1,0 +1,407 @@
+---
+title: "DHR Proteomics v01"
+output:
+  html_document:
+    fig_width: 9
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+Require all the libraries
+```{r}
+require(SummarizedExperiment)
+require(plotly)
+require(geneplotter)
+require(RColorBrewer)
+require(openxlsx)
+require(factoextra)
+require(FactoMineR)
+require(ICC)
+require(tidyverse)
+```
+
+Read the data and store as SummarizedEzxperiment
+
+```{r}
+outDir <- "/home/francesco.marabita/Projects/DHR/data/Proteomics/out"
+load("/home/francesco.marabita/Projects/DHR/data/Clinical/Clin_data_2018-02-13.RData")
+
+
+prot.files <- list.files("/home/francesco.marabita/Projects/DHR/data/Proteomics", pattern ="^Proteomics_.*\\.xlsx$", full.names = T)
+
+for(i in 1:length(prot.files)){
+  # read data
+
+  assayData_NaN <- read.xlsx(prot.files[i], sheet = "assayData_NaN", colNames =T, rowNames = T,
+                             skipEmptyRows=T, na.strings = "NaN")
+  assayData_NaN[assayData_NaN=="NaN"] <- NA
+  rownames(assayData_NaN) <- make.names(rownames(assayData_NaN))
+  
+
+  assayData_LOD <- read.xlsx(prot.files[i], sheet = "assayData_LOD", colNames = T, rowNames = T,
+                             skipEmptyRows=T, na.strings = "NaN")
+  rownames(assayData_LOD) <- make.names(rownames(assayData_LOD))
+
+  fData <- read.xlsx(prot.files[i], sheet = "fData", colNames =T, rowNames = F, skipEmptyRows=T)
+  fData$orig.feature.ID <- fData$feature.ID
+  fData$feature.ID <- make.names(fData$orig.feature.ID)
+  rownames(fData) <- fData$feature.ID
+  
+  pData_ <- read.xlsx(prot.files[i], sheet = "pData", colNames =T, rowNames = F, skipEmptyRows=T)
+  
+  tmp <- as.data.frame(clin.data[, c("ID", "visit_id", "VISITnumber", "dateofbirth", "Age", "Visit", "Visittime", "Sex")])
+  colnames(tmp) <- c("IID", "ID", "Visit.number", "Birth.date", "Age", "Visit.date", "Visit.time", "Sex")
+
+  pData <- merge(pData_, tmp, by.x="Visit.ID", by.y="ID", all.x=T, sort=F)
+  pData <- pData[match(pData_$Visit.ID, pData$Visit.ID),]
+  colnames(pData)[1] <- "ID"
+  rownames(pData) <- pData$ID
+  
+ 
+  gc()
+  
+  # create SummarizedExperiment
+  if(all(rownames(assayData_NaN)==rownames(assayData_LOD)) &
+     all(colnames(assayData_NaN)==colnames(assayData_LOD)) &
+     all(rownames(assayData_NaN)==rownames(fData)) &
+     all(colnames(assayData_NaN)==rownames(pData))){
+    
+    tmp <- SummarizedExperiment(assays = list(NPX_NaN=as.matrix(assayData_NaN), 
+                                              NPX_LOD=as.matrix(assayData_LOD)),
+                                rowData = DataFrame(fData),
+                                colData = DataFrame(pData),
+                                metadata = list(panel=sapply(strsplit(prot.files[i], "_"), "[",2)))
+    
+    tmp <- tmp[,tmp$IID %in% unique(clin.data$ID)]
+    rowData(tmp)$n.LOD <- rowSums(is.na(assays(tmp)$NPX_NaN))
+    assign(paste0("prot.se.",i), tmp)
+    rm(tmp)
+    
+  } else { stop("Order is different") }
+  
+  message(paste0("Done with ", i, " of ", length(prot.files)))
+}
+
+```
+Check overlap between proteins
+
+```{r}
+l.fID <- list()
+l.uID <- list()
+for(i in 1:length(prot.files)){
+  l.fID[[i]] <- rowData(get(paste0("prot.se.",i)))$feature.ID
+  l.uID[[i]] <- rowData(get(paste0("prot.se.",i)))$Uniprot.ID
+  names(l.fID)[i] <-metadata(get(paste0("prot.se.",i)))$panel
+  names(l.uID)[i] <-metadata(get(paste0("prot.se.",i)))$panel
+
+}
+
+crossprod(table(stack(l.fID)))
+crossprod(table(stack(l.uID)))
+
+
+
+```
+
+# Quality control
+In order to check for sample-to-sample relationship, outliers and batch effects, I consider the following:
+
+* Density plot
+* Boxpots
+* PCA
+
+## Density plot
+
+```{r}
+for(i in 1:length(prot.files)){
+  multidensity(assays(get(paste0("prot.se.",i)))$NPX_LOD, legend = F, main=metadata(get(paste0("prot.se.",i)))$panel,
+               xlab="NPX")
+  multidensity(assays(get(paste0("prot.se.",i)))$NPX_NaN, legend = F, main=metadata(get(paste0("prot.se.",i)))$panel,
+               xlab="NPX")
+}
+```
+
+## Boxplots
+```{r  fig.height=20}
+# for(i in 1:length(prot.files)){
+#   temp.l <- as.data.frame(assays(get(paste0("prot.se.",i)))$NPX_LOD) %>% 
+#     mutate(feature=rownames(.)) %>% 
+#     gather(key =  "ID", value = "NPX", -feature)
+#   
+#   p <- ggplot(temp.l, aes(x=ID, y=NPX))
+#   p + geom_boxplot(aes(fill=ID))+ 
+#     coord_flip()+
+#     ggtitle("NPX (LOD)")+
+#     theme(legend.position="none")
+#   print(p)
+# }
+```
+
+## PCA
+```{r message=TRUE, warning=TRUE}
+for(i in 1:length(prot.files)){
+  
+  tmp <- assays(get(paste0("prot.se.",i)))$NPX_LOD
+  if(any(apply(tmp,1, var)==0)){
+    tmp <- tmp[apply(tmp,1, var)!=0,]
+    message("Some feature have zero variance, these have been removed")
+  }
+  #colnames(tmp) <- paste0(get(paste0("prot.se.",i))$ID, "_", get(paste0("prot.se.",i))$VISITnumber)
+  #prcomp(t(tmp), center = T, scale.=F) -> tmp
+  
+  PCA(t(tmp), scale.unit = F, graph = F, ncp = nrow(tmp)) -> tmp
+  
+  p1 <- fviz_pca_ind(tmp,
+                     col.ind = get(paste0("prot.se.",i))$Chip.name,
+                     geom.ind = "point", mean.point=F, pointshape=19)+
+    ggtitle(metadata(get(paste0("prot.se.",i)))$panel)
+  
+  p2 <- fviz_pca_ind(tmp,
+                     col.ind =get(paste0("prot.se.",i))$Chip.name,
+                     geom.ind = c("point", "text"), mean.point=F, pointshape=19)+
+    ggtitle(metadata(get(paste0("prot.se.",i)))$panel)
+  
+  # p3 <- fviz_pca_ind(tmp,
+  #                    col.ind = get(paste0("prot.se.",i))$Chip.name,
+  #                    geom.ind = "point", mean.point=F, pointshape=19)+
+  #   geom_text(aes(x=tmp$ind$coord[,1],
+  #                 y=tmp$ind$coord[,2],
+  #                 col = get(paste0("prot.se.",i))$Chip.name),
+  #             label=get(paste0("prot.se.",i))$IID)+
+  #   ggtitle(metadata(get(paste0("prot.se.",i)))$panel)
+  
+  p4 <- fviz_pca_ind(tmp,
+                     col.ind = get(paste0("prot.se.",i))$Flag,
+                     geom.ind = "point", mean.point=F, pointshape=19)+
+    ggtitle(metadata(get(paste0("prot.se.",i)))$panel)
+  
+  p5 <- fviz_pca_ind(tmp,
+                     col.ind = get(paste0("prot.se.",i))$Sex,
+                     geom.ind = "point", mean.point=F, pointshape=19)+
+    ggtitle(metadata(get(paste0("prot.se.",i)))$panel)
+  
+  print(p1)
+  print(p2)
+  #print(p3)
+  print(p4)
+  
+  message(paste0("Done with ", metadata(get(paste0("prot.se.",i)))$panel))
+}
+
+```
+
+For the CVDII Inflammation and OncologyII panels, some problems are detected. I will investigate what are the protein contribution.
+
+```{r results="asis"}
+
+# CVDII
+tmp <- assays(prot.se.2)$NPX_LOD
+  if(any(apply(tmp,1, var)==0)){
+    tmp <- tmp[apply(tmp,1, var)!=0,]
+    message("Some feature have zero variance, these have been removed")
+  }
+PCA(t(tmp), scale.unit = F, graph = F, ncp = nrow(tmp)) -> tmp
+
+DT::datatable(as.data.frame(tmp$eig),
+              options = list(autoWidth = TRUE))
+
+DT::datatable(as.data.frame(tmp$var$contrib),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+DT::datatable(as.data.frame(tmp$var$cos2),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+fviz_contrib(tmp, choice = "var", axes=1)
+fviz_contrib(tmp, choice = "var", axes=2)
+
+```
+
+```{r results="asis"}
+
+# Inflammation
+tmp <- assays(prot.se.4)$NPX_LOD
+  if(any(apply(tmp,1, var)==0)){
+    tmp <- tmp[apply(tmp,1, var)!=0,]
+    message("Some feature have zero variance, these have been removed")
+  }
+PCA(t(tmp), scale.unit = F, graph = F, ncp = nrow(tmp)) -> tmp
+
+DT::datatable(as.data.frame(tmp$eig),
+              options = list(autoWidth = TRUE))
+
+DT::datatable(as.data.frame(tmp$var$contrib),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+DT::datatable(as.data.frame(tmp$var$cos2),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+fviz_contrib(tmp, choice = "var", axes=1)
+fviz_contrib(tmp, choice = "var", axes=2)
+
+```
+```{r results="asis"}
+
+# OncologyII
+tmp <- assays(prot.se.6)$NPX_LOD
+  if(any(apply(tmp,1, var)==0)){
+    tmp <- tmp[apply(tmp,1, var)!=0,]
+    message("Some feature have zero variance, these have been removed")
+  }
+PCA(t(tmp), scale.unit = F, graph = F, ncp = nrow(tmp)) -> tmp
+
+DT::datatable(as.data.frame(tmp$eig),
+              options = list(autoWidth = TRUE))
+
+DT::datatable(as.data.frame(tmp$var$contrib),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+DT::datatable(as.data.frame(tmp$var$cos2),
+              options = list(autoWidth = TRUE, scrollX=TRUE))
+
+fviz_contrib(tmp, choice = "var", axes=1)
+fviz_contrib(tmp, choice = "var", axes=2)
+
+```
+The PCA score plots seems to be originating from a few outliers proteins:
+
+1. CVDII panel: 142_FS (Uniprot:P19883, GeneSymbol:FST, GeneName: Follistatin)
+2. Inflammation panel: 103_BDNF (Uniprot:P23560, GeneSymbol:BDNF, GeneName: Brain-derived neurotrophic factor)
+3. OncologyII panel: 188_FR-gamma  (Uniprot:P41439, GeneSymbol:FOLR3, GeneName: Folate receptor gamma)
+
+1 seems to be a technical outlier, as the samples belonging to the very same chip have similar negative score in PC1. In fact all samples in plate 3 of the CVDII panel have missing data for the 142_FS protein. However, 2 and 3 do not seem to be attributable to a chip effect. It remain to be investigated if they reflect true biological signal. A plot is available below
+
+CVDII panel: 142_FS
+
+```{r}
+data.frame(NPX_LOD=assays(prot.se.2)$NPX_LOD["X142_FS",], ID=colnames(prot.se.2), Chip=prot.se.2$Chip.name) %>%
+  arrange(Chip) %>% 
+  ggplot(aes(x=1:ncol(prot.se.2), y=NPX_LOD))+
+  geom_segment(aes(col=Chip, xend=1:ncol(prot.se.2), yend=0), stat = "identity", size=1)+
+  ggtitle("142_FS")
+```
+Inflammation panel: 103_BDNF
+
+```{r}
+data.frame(NPX_LOD=assays(prot.se.4)$NPX_LOD["X103_BDNF",], ID=colnames(prot.se.2), Chip=prot.se.2$Chip.name) %>%
+  arrange(Chip) %>% 
+  ggplot(aes(x=1:ncol(prot.se.4), y=NPX_LOD))+
+  geom_segment(aes(col=Chip, xend=1:ncol(prot.se.2), yend=0), stat = "identity", size=1)+
+  ggtitle("103_BDNF")
+```
+
+OncologyII panel: 188_FR-gamma
+
+```{r}
+data.frame(NPX_LOD=assays(prot.se.6)$NPX_LOD["X188_FR.gamma",], ID=colnames(prot.se.2), Chip=prot.se.2$Chip.name) %>%
+  arrange(Chip) %>% 
+  ggplot(aes(x=1:ncol(prot.se.6), y=NPX_LOD))+
+  geom_segment(aes(col=Chip, xend=1:ncol(prot.se.2), yend=0), stat = "identity", size=1)+
+  ggtitle("188_FR-gamma")
+```
+# Feature and sample CV
+
+```{r}
+for(i in 1:length(prot.files)){
+  
+  tmp <- assays(get(paste0("prot.se.",i)))$NPX_LOD
+  
+  cv.f <- data.frame(CV=apply(tmp,1, function(x) sd(2^x, na.rm = T)/mean(2^x,na.rm=T)),
+                     feature=rownames(tmp))
+  cv.s <- data.frame(CV=apply(tmp,2, function(x) sd(2^x, na.rm = T)/mean(2^x,na.rm=T)),
+                     ID=colnames(tmp),
+                     Chip=get(paste0("prot.se.",i))$Chip.name,
+                     Flag=get(paste0("prot.se.",i))$Flag)
+  
+  p1 <- cv.f %>%
+    arrange(desc(CV)) %>%
+    ggplot(aes(x=1:nrow(tmp), y=CV))+
+    geom_segment(aes(xend=1:nrow(tmp), yend=0), stat = "identity", size=1)+
+    scale_x_continuous("feature index", labels = cv.f$feature[order(cv.f$CV, decreasing = T)], breaks = 1:nrow(tmp))+
+    ggtitle(paste0("Feature CV - ",metadata(get(paste0("prot.se.",i)))$panel))+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+  
+  print(p1)
+  
+  p2 <- cv.s %>% 
+    arrange(Chip) %>% 
+    ggplot(aes(x=1:ncol(tmp), y=CV))+
+    geom_segment(aes(col=Chip, xend=1:ncol(tmp), yend=0), stat = "identity", size=1)+
+    geom_point(aes(shape=Flag))+
+    scale_shape_manual(values=c("Passed"=NA,"Flagged"=19))+
+    xlab("sample index")+
+    ggtitle(paste0("Sample CV - ",metadata(get(paste0("prot.se.",i)))$panel))+
+     theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+  
+  print(p2)
+  
+}
+```
+
+# Fraction of features and samples with NA
+
+```{r}
+for(i in 1:length(prot.files)){
+  
+  tmp <- assays(get(paste0("prot.se.",i)))$NPX_NaN
+  
+  na.f <- data.frame(n.miss=apply(tmp,1, function(x) sum(is.na(x))/length(x)),
+                     feature=rownames(tmp))
+  na.s <- data.frame(n.miss=apply(tmp,2, function(x) sum(is.na(x))/length(x)),
+                     ID=colnames(tmp),
+                     Chip=get(paste0("prot.se.",i))$Chip.name,
+                     Flag=get(paste0("prot.se.",i))$Flag)
+  
+  p1 <- na.f %>%
+    arrange(desc(n.miss)) %>%
+    ggplot(aes(x=1:nrow(tmp), y=n.miss))+
+    geom_segment(aes(xend=1:nrow(tmp), yend=0), stat = "identity", size=1)+
+    scale_x_continuous("feature index", labels = na.f$feature[order(na.f$n.miss, decreasing = T)], breaks = 1:nrow(tmp))+
+    scale_y_continuous(limits = c(0,1))+
+    ggtitle(paste0("Numer of missing data - ",metadata(get(paste0("prot.se.",i)))$panel))+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+  
+  print(p1)
+  
+  p2 <- na.s %>% 
+    arrange(Chip) %>% 
+    ggplot(aes(x=1:ncol(tmp), y=n.miss))+
+    geom_segment(aes(col=Chip, xend=1:ncol(tmp), yend=0), stat = "identity", size=1)+
+    geom_point(aes(shape=Flag))+
+    scale_shape_manual(values=c("Passed"=NA,"Flagged"=19))+
+    xlab("sample index")+
+    scale_y_continuous(limits = c(0,1))+
+    ggtitle(paste0("Numer of missing data - ",metadata(get(paste0("prot.se.",i)))$panel))+
+     theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+  
+  print(p2)
+  
+}
+```
+
+
+# Intraclass Correlation Coefficient
+Calculate Intraclass Correlation Coefficient (ICC) to score the normalization methods. In principle, samples belonging to the same subject should be more similar to each other.
+
+```{r, message=F, warning=F}
+ICC.l <- list()
+for(i in 1:length(prot.files)){
+  
+  ICC.l[[i]] <- matrix(nrow=nrow(get(paste0("prot.se.",i))), ncol = 1,
+                       dimnames = list(rownames(get(paste0("prot.se.",i))), metadata(get(paste0("prot.se.",i)))$panel))
+  for(j in 1:nrow(ICC.l[[i]])){
+    trash <- capture.output(ICC.l[[i]][j,] <- ICCbare(IID,NPX_LOD,
+                                                      data=data.frame(IID=get(paste0("prot.se.",i))$IID,
+                                                                      NPX_LOD=assays(get(paste0("prot.se.",i)))$NPX_LOD[j,])))
+  }
+  names(ICC.l)[i] <- metadata(get(paste0("prot.se.",i)))$panel
+}
+
+boxplot(ICC.l, las=2)
+
+as.data.frame(sapply(ICC.l, median))
+
+as.data.frame(sapply(ICC.l, quantile))
+
+```

@@ -1,0 +1,116 @@
+---
+title: "DHR Variance Partition v03"
+author: "Francesco Marabita"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 7
+    theme: cerulean
+    toc: yes
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+# Variance partition
+
+I will fit a LME model to all the data to partition the variance into the *Fixed*, *Random* and *Residual* components. The *Fixed* component represents the effect of Age, Sex, and time, while the *Random* component is the between-individual effect, specified as a random intercept. 
+
+## Load the library and the data
+
+```{r}
+require(MultiAssayExperiment)
+require(SummarizedExperiment)
+require(lme4)
+require(insight)
+require(tidyverse)
+
+load("/home/francesco.marabita/Projects/DHR/data/MultiAssayExp/out/DHR_MAexp_v05.RData")
+```
+
+## Prepare data for linear model
+
+* Make sure there are no feature with zero variance
+* Make longFormat with covariates
+
+```{r}
+# Get rid of rows that have zero variance
+for (i in 1:length(experiments(MAexp.clean))){
+  experiments(MAexp.clean)[[i]] <- experiments(MAexp.clean)[[i]][apply(assay(MAexp.clean[[i]]), 1, function(x) var(x,na.rm = T) != 0), ]
+}
+
+# inlcude only omics data
+data.lmm <-  longFormat(MAexp.clean, colDataCols="Sex")
+#data.lmm <-  longFormat(MAexp.clean, colDataCols=c("Sex", "clust.mf.comb"))
+data.lmm$Sex <- fct_relevel(data.lmm$Sex, "F", "M")
+#data.lmm$group <- fct_recode(data.lmm$clust.mf.comb, Low = "F1", High = "F2", High="F3", High="F4", Low="M1", High="M2")
+data.lmm$IID <- as.factor(data.lmm$primary)
+data.lmm$Age <- pData$Age[match(as.character(data.lmm$colname), pData$ID)]
+data.lmm$Visit.number <- as.factor(pData$Visit.number[match(as.character(data.lmm$colname), pData$ID)])
+data.lmm$feature.ID <- paste0(data.lmm$assay,"_",data.lmm$rowname)
+```
+
+Check if time points can be taken approximately as equally spaced observations and create the new variable `Time.point`.
+
+```{r}
+# time points are approximately equally distributed
+ggplot(as.data.frame(pData), aes(y=IID, x=Visit.date))+
+  geom_point()
+
+# consider Time.point as numeric (Visit.number - 1)
+length(unique(data.lmm$IID[data.lmm$Visit.number==1])) == length(unique(data.lmm$IID))
+
+data.lmm$Time.point <- as.numeric(as.character(data.lmm$Visit.number)) - 1
+```
+
+
+## Fit linear mixed  model
+
+I will model each feature as a function of  `Age`, `Sex`, `Time.point` (0-4). A random intercept will be considered to model the subject-specific effect `(1 | IID)`.
+
+```{r}
+feature.ID <- unique(data.lmm$feature.ID)
+
+list.lmm <- mclapply(feature.ID, function(x) {
+  lmer(value ~ Age + Sex + Time.point + (1 | IID),
+       data = as.data.frame(data.lmm[data.lmm$feature.ID==x,]))
+}, mc.preschedule = T, mc.cores = 36)
+names(list.lmm) <- feature.ID
+```
+
+## Extract variance components
+
+```{r}
+df.var <- bind_rows(lapply(list.lmm, function(x) as.data.frame(get_variance(x))), .id="feature.ID")
+df.var$f.var.fixed <- df.var$var.fixed/(df.var$var.fixed + df.var$var.random + df.var$var.residual)
+df.var$f.var.random <- df.var$var.random/(df.var$var.fixed + df.var$var.random + df.var$var.residual)
+df.var$f.var.residual <- df.var$var.residual/(df.var$var.fixed + df.var$var.random + df.var$var.residual)
+
+df.var %>% 
+  select(feature.ID, starts_with("f.var")) %>% 
+  mutate(assay=data.lmm$assay[match(feature.ID, data.lmm$feature.ID)]) %>%
+  mutate(assay.group=if_else(grepl("prot\\..+$", assay),"prot",assay)) %>%
+  mutate(assay.group=fct_relevel(assay.group, c("clinical","GCMS", "LCMS.neg", "LCMS.pos","autoab","prot","microb.16S"))) %>% 
+  gather(key="type", value="value", -c(feature.ID, assay, assay.group)) %>% 
+  ggplot(aes(type,value))+
+  ggbeeswarm::geom_beeswarm(aes(col=type)) + 
+  geom_boxplot(width=0.1, fill="white", outlier.colour = NA) +
+  scale_x_discrete(labels=c("Fixed", "Random", "Residual")) +
+  facet_wrap(~assay.group, scales = "free_x") +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+df.var %>% 
+  select(feature.ID, starts_with("f.var")) %>% 
+  mutate(assay=data.lmm$assay[match(feature.ID, data.lmm$feature.ID)]) %>%
+  mutate(assay.group=if_else(grepl("prot\\..+$", assay),"prot",assay)) %>%
+  mutate(assay.group=fct_relevel(assay.group, c("clinical","GCMS", "LCMS.neg", "LCMS.pos","autoab","prot","microb.16S"))) %>% 
+  gather(key="type", value="value", -c(feature.ID, assay, assay.group)) %>% 
+  group_by(assay.group, type) %>% 
+  summarise(average=mean(value, na.rm=T)) %>% 
+  DT::datatable()
+```
+
+
+
