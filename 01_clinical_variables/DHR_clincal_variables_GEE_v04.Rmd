@@ -149,7 +149,8 @@ for(i in 1:nrow(ref.out)) {
 ```
 
 ## Fit GEE
-I will model each variable as a function of `Sex`, `Age` and `Visit.number`. I will extract estimates for the whole polutation if there are no OOR at baseline (`OORB`), or if less than 5 individuals.
+
+I will model each variable as a function of `Sex`, `Age`, `Visit.number`, `OORB` and the interaction `Visit.number`:`OORB`. I will extract estimates for the whole polutation if there are no OORB individuals, or if less than 5 individuals.
 
 ```{r}
 list.gee <- list()
@@ -205,7 +206,7 @@ names(summary.gee) <- var
 
 ```
 
-Test the marginal effect of `Visit.number`, as  a linear combination of `Visit.number` and `OORB`, if the interaction term was included.
+Test the marginal effect of time, as a linear combination of `Visit.number` and `OORB`, if the interaction term was included.
 
 ```{r}
 
@@ -223,24 +224,18 @@ get.eff <- function(x) {
   return(c(res,type=type, n_OORB=n))
 }
 
+
 effect.m <- sapply(list.gee, get.eff)
 effect.df <- as.data.frame(t(effect.m))
-effect.df$FDR <- p.adjust(effect.df[,"Pr(>|X^2|)"], method = "fdr")
+effect.df$FDR <- p.adjust(effect.df[,"p.value"], method = "fdr")
 
-DT::datatable(effect.df, options = list(scrollX=T))
+DT::datatable(effect.df, options = list(scrollX=T, dom = "lftipB", buttons = c("copy", "csv")), extensions = "Buttons")
 ```
 
 
 For all the variables, print prediciton with bootstrapped SE. I will predict the effect for M and F and keeping `Age` constant and equal to the population mean.
 
 ```{r}
-
-#sel.var <- na.omit(unique(clin.data.long$variable[clin.data.long$OORB]))
-# sel.var <- c("ApoB_ApoA1ratio", "BMI", "DiastolicBP_mean", "fPGluk", "fPKol",
-#              "fPKolHDL", "fpKolLDL",  "fPTrigly", "fSLipoA1", "fSLipoB", 
-#              "hsCRP", "KolHDLrat", "PGT", "PULSE_mean", "SD25",
-#              "STSH", "SystolicBP_mean")
-
 new.data <- data.frame(Sex=c(rep("F", 8), rep("M", 8)),
                        Age=rep(mean(clin.data$Age), 16),
                        Visit.number=rep((2:5),4),
@@ -378,9 +373,9 @@ get.eff <- function(x) {
 
 effect.m.lmm <- sapply(list.lmm, get.eff)
 effect.df.lmm <- as.data.frame(t(effect.m.lmm))
-effect.df.lmm$FDR <- p.adjust(effect.df.lmm[,"Pr(>|X^2|)"], method = "fdr")
+effect.df.lmm$FDR <- p.adjust(effect.df.lmm[,"p.value"], method = "fdr")
 
-DT::datatable(effect.df.lmm, options = list(scrollX=T))
+DT::datatable(effect.df.lmm, options = list(scrollX=T, dom = "lftipB", buttons = c("copy", "csv")), extensions = "Buttons")
 ```
 
 Save
