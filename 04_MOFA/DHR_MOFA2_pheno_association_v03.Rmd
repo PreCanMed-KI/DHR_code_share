@@ -11,10 +11,6 @@ output:
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 ---
 
-The main difference with v02:
-
-* I do not consider the phenotypic clusters and groups in the analysis
-* I fit a linear mixed model for each test as well
 
 ```{r}
 require(MOFA2)
@@ -51,7 +47,10 @@ q.pval <- matrix(NA,
 
 q.rsq <- q.pval
 q.plme <- q.pval
+q.plme.war <- q.pval
 
+
+pb <- txtProgressBar(max = nrow(q.pval), style = 3)
 
 for(i in 1:nrow(q.pval)){
   for(j in 1:ncol(mofa.factors)){
@@ -144,30 +143,43 @@ for(i in 1:nrow(q.pval)){
     if(length(unique(na.omit(data12$value)))>=2){
       data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
       data.anova <- anova(data.lm)
+      
+      # avoid perfect fit
       if(data.anova$Df[length(data.anova$Df)]==0) {
         # avoid perfect fit
         q.pval[i,j] <- NA
         q.rsq[i,j] <- NA
         q.plme[i,j] <- NA
+        q.plme.war[i,j] <- NA
+        
       } else {
         q.pval[i,j] <- data.anova$`Pr(>F)`[1]
         q.rsq[i,j] <- summary(data.lm)$r.squared
-        # fit mixed model only if there are less IID than observations (ID) and if at least 5 IID
+        
+        # fit mixed model only if there are less IID than observations (ID), if at least 5 IID, and not for the family history (DHR03.*)
         if(length(unique(na.omit(data12$IID[!is.na(data12$value)])))<length(unique(na.omit(data12$ID[!is.na(data12$value)]))) &
-           length(unique(na.omit(data12$IID[!is.na(data12$value)])))>=5){
-          data.lme <-  lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value  + (1 | IID), data=data12)
-          data.anova.lme <- Anova(data.lme, test="F")
+           length(unique(na.omit(data12$IID[!is.na(data12$value)])))>=5 &
+           !grepl("^DHR03\\.", rownames(q.pval)[i])){
+          
+          lmer.quiet <- quietly(lmer)
+          data.lme <- lmer.quiet(get(colnames(mofa.factors)[j]) ~ Age + Sex + value  + (1 | IID), data=data12)
+          data.anova.lme <- Anova(data.lme$result, test="F")
           q.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+          q.plme.war[i,j] <- paste(paste(data.lme$messages, collapse = "; "), paste(data.lme$warnings, collapse = "; "), sep = " - ")
+          
         } else {
           q.plme[i,j] <- NA
+          q.plme.war[i,j] <- NA
         }
       }
     } else {
       q.pval[i,j] <- NA
       q.rsq[i,j] <- NA
       q.plme[i,j] <- NA
+      q.plme.war[i,j] <- NA
     }
   }
+  setTxtProgressBar(pb, i)
 }
 
 ```
@@ -188,7 +200,16 @@ hfii.pval <- matrix(NA,
                     dimnames = list(unique(hfii.l$component), colnames(mofa.factors)))
 hfii.rsq <- hfii.pval
 hfii.plme <- hfii.pval
+hfii.plme.war <- hfii.pval
 
+  # for(j in 1:ncol(mofa.factors)){
+  #   data1 <- as.data.frame(mofa.factors[,j, drop=F])
+  #   data1$ID <- rownames(data1)
+  #   data12 <- merge(data1, hfii.l, by="ID", sort=F)
+  #   data.lm <- lm(get(colnames(mofa.factors)[j]) ~ as.ordered(as.numeric(value)), data=data12)
+  #   data.anova <- anova(data.lm)
+  #   hfii.pval[j] <- data.anova$`Pr(>F)`[1]
+  # }
 
 for(i in 1:nrow(hfii.pval)){
   for(j in 1:ncol(mofa.factors)){
@@ -200,11 +221,13 @@ for(i in 1:nrow(hfii.pval)){
     data2 <- hfii.l[hfii.l$component==rownames(hfii.pval)[i],]
     data12 <- merge(data1, data2, by="ID", sort=F)
     data.lm <- lm(get(colnames(mofa.factors)[j]) ~ as.ordered(as.numeric(value)), data=data12)
-    data.lme <-  lmer(get(colnames(mofa.factors)[j]) ~  Age + Sex + as.ordered(as.numeric(value)) + (1 | IID), data=data12)
+    lmer.quiet <- quietly(lmer)
+    data.lme <-  lmer.quiet(get(colnames(mofa.factors)[j]) ~  Age + Sex + as.ordered(as.numeric(value)) + (1 | IID), data=data12)
     data.anova <- anova(data.lm)
-    data.anova.lme <- Anova(data.lme, test="F")
+    data.anova.lme <- Anova(data.lme$result, test="F")
     hfii.pval[i,j] <- data.anova$`Pr(>F)`[1]
     hfii.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    hfii.plme.war[i,j] <- paste(paste(data.lme$messages, collapse = "; "), paste(data.lme$warnings, collapse = "; "), sep = " - ")
     hfii.rsq[i,j] <- summary(data.lm)$r.squared
   }
 }
@@ -232,6 +255,7 @@ clin.pval <- matrix(NA,
                     dimnames = list(colnames(clin.data.sel), colnames(mofa.factors)))
 clin.rsq <- clin.pval
 clin.plme <- clin.pval
+clin.plme.war <- clin.pval
 
 for(i in 1:nrow(clin.pval)){
   for(j in 1:ncol(mofa.factors)){
@@ -248,11 +272,15 @@ for(i in 1:nrow(clin.pval)){
     clin.pval[i,j] <- data.anova$`Pr(>F)`[1]
     clin.rsq[i,j] <- summary(data.lm)$r.squared
     if(!any(colnames(clin.data.sel)[i] %in% c("Age", "Sex"))){
-      data.lme <-  lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + get(colnames(clin.data.sel)[i]) +  (1 | IID), data=data12)
-      data.anova.lme <- Anova(data.lme, test="F")
+      lmer.quiet <- quietly(lmer)
+      data.lme <-  lmer.quiet(get(colnames(mofa.factors)[j]) ~ Age + Sex + get(colnames(clin.data.sel)[i]) +  (1 | IID), data=data12)
+      data.anova.lme <- Anova(data.lme$result, test="F")
       clin.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+      clin.plme.war[i,j] <- paste(paste(data.lme$messages, collapse = "; "), paste(data.lme$warnings, collapse = "; "), sep = " - ")
     } else {
       clin.plme[i,j] <- NA
+      clin.plme.war[i,j] <- NA
+      
     }
   }
 }
@@ -274,6 +302,7 @@ kk.pval <- matrix(NA,
                   dimnames = list(unique(kk.l$component), colnames(mofa.factors)))
 kk.rsq <- kk.pval
 kk.plme <- kk.pval
+kk.plme.war <- kk.pval
 
 for(i in 1:nrow(kk.pval)){
   for(j in 1:ncol(mofa.factors)){
@@ -291,14 +320,19 @@ for(i in 1:nrow(kk.pval)){
       kk.pval[i,j] <- data.anova$`Pr(>F)`[1]
       kk.rsq[i,j] <- summary(data.lm)$r.squared
       kk.plme[i,j] <- NA
+      kk.plme.war[i,j] <- NA
+    } else {
+      data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
+      lmer.quiet <- quietly(lmer)
+      data.lme <- lmer.quiet(get(colnames(mofa.factors)[j]) ~ Age + Sex + value +  (1 | IID), data=data12)
+      data.anova <- anova(data.lm)
+      data.anova.lme <- Anova(data.lme$result, test="F")
+      kk.pval[i,j] <- data.anova$`Pr(>F)`[1]
+      kk.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+      kk.plme.war[i,j] <- paste(paste(data.lme$messages, collapse = "; "), paste(data.lme$warnings, collapse = "; "), sep = " - ")
+      kk.rsq[i,j] <- summary(data.lm)$r.squared
     }
-    data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
-    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value +  (1 | IID), data=data12)
-    data.anova <- anova(data.lm)
-    data.anova.lme <- Anova(data.lme, test="F")
-    kk.pval[i,j] <- data.anova$`Pr(>F)`[1]
-    kk.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
-    kk.rsq[i,j] <- summary(data.lm)$r.squared
+    
   }
 }
 ```
@@ -313,6 +347,7 @@ a.score.pval <- matrix(NA,
 
 a.score.rsq <- a.score.pval
 a.score.plme <- a.score.pval
+a.score.plme.war <- a.score.pval
 
 for(j in 1:ncol(mofa.factors)){
   data1 <- as.data.frame(mofa.factors[,j, drop=F])
@@ -322,11 +357,13 @@ for(j in 1:ncol(mofa.factors)){
   data1$Sex <- clin.data$Sex[match(data1$ID, clin.data$ID)]
   data12 <- merge(data1, a.score, by="ID", sort=F)
   data.lm <- lm(get(colnames(mofa.factors)[j]) ~ apnea_score, data=data12)
-  data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + apnea_score +  (1 | IID), data=data12)
+  lmer.quiet <- quietly(lmer)
+  data.lme <- lmer.quiet(get(colnames(mofa.factors)[j]) ~ Age + Sex + apnea_score +  (1 | IID), data=data12)
   data.anova <- anova(data.lm)
-  data.anova.lme <- Anova(data.lme, test="F")
+  data.anova.lme <- Anova(data.lme$result, test="F")
   a.score.pval[1,j] <- data.anova$`Pr(>F)`[1]
   a.score.plme[1,j] <- data.anova.lme$`Pr(>F)`[3]
+  a.score.plme.war[1,j] <- paste(paste(data.lme$messages, collapse = "; "), paste(data.lme$warnings, collapse = "; "), sep = " - ")
   a.score.rsq[1,j] <- summary(data.lm)$r.squared
 }
 ```
@@ -334,7 +371,6 @@ for(j in 1:ncol(mofa.factors)){
 ## Stress score
 
 ```{r}
-
 s.score %>% 
   gather(key="component", value="value", -ID) -> s.score.l
 
@@ -345,6 +381,7 @@ s.score.pval <- matrix(NA,
                     dimnames = list(unique(s.score.l$component), colnames(mofa.factors)))
 s.score.rsq <- s.score.pval
 s.score.plme <- s.score.pval
+s.score.plme.war <- s.score.pval
 
 for(i in 1:nrow(s.score.pval)){
   for(j in 1:ncol(mofa.factors)){
@@ -356,11 +393,13 @@ for(i in 1:nrow(s.score.pval)){
     data2 <- s.score.l[s.score.l$component==rownames(s.score.pval)[i],]
     data12 <- merge(data1, data2, by="ID", sort=F)
     data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
-    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~  Age + Sex + value + (1 | IID), data=data12)
+    lmer.quiet <- quietly(lmer)
+    data.lme <- lmer.quiet(get(colnames(mofa.factors)[j]) ~  Age + Sex + value + (1 | IID), data=data12)
     data.anova <- anova(data.lm)
-    data.anova.lme <- Anova(data.lme, test="F")
+    data.anova.lme <- Anova(data.lme$result, test="F")
     s.score.pval[i,j] <- data.anova$`Pr(>F)`[1]
     s.score.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    s.score.plme.war[i,j] <- paste(paste(data.lme$messages, collapse = "; "), paste(data.lme$warnings, collapse = "; "), sep = " - ")
     s.score.rsq[i,j] <- summary(data.lm)$r.squared
   }
 }
@@ -375,6 +414,7 @@ f.pval <- matrix(NA,
                  dimnames = list(unique(f1to5.l$component), colnames(mofa.factors)))
 f.rsq <- f.pval
 f.plme <- f.pval
+f.plme.war <- f.pval
 
 for(i in 1:nrow(f.pval)){
   for(j in 1:ncol(mofa.factors)){
@@ -386,11 +426,13 @@ for(i in 1:nrow(f.pval)){
     data2 <- f1to5.l[f1to5.l$component==rownames(f.pval)[i],]
     data12 <- merge(data1, data2, by="ID", sort=F)
     data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
-    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value +  (1 | IID), data=data12)
+    lmer.quiet <- quietly(lmer)
+    data.lme <- lmer.quiet(get(colnames(mofa.factors)[j]) ~ Age + Sex + value +  (1 | IID), data=data12)
     data.anova <- anova(data.lm)
-    data.anova.lme <- Anova(data.lme, test="F")
+    data.anova.lme <- Anova(data.lme$result, test="F")
     f.pval[i,j] <- data.anova$`Pr(>F)`[1]
     f.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    f.plme.war[i,j] <- paste(paste(data.lme$messages, collapse = "; "), paste(data.lme$warnings, collapse = "; "), sep = " - ")
     f.rsq[i,j] <- summary(data.lm)$r.squared
   }
 }
@@ -415,6 +457,7 @@ sleep.pval <- matrix(NA,
                      dimnames = list(unique(sleep.df$type), colnames(mofa.factors)))
 sleep.rsq <- sleep.pval
 sleep.plme <- sleep.pval
+sleep.plme.war <- sleep.pval
 
 for(i in 1:nrow(sleep.pval)){
   for(j in 1:ncol(mofa.factors)){
@@ -426,11 +469,13 @@ for(i in 1:nrow(sleep.pval)){
     data2 <- sleep.df[sleep.df$type==rownames(sleep.pval)[i],]
     data12 <- merge(data1, data2, by="ID", sort=F)
     data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
-    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value + (1 | IID), data=data12)
+    lmer.quiet <- quietly(lmer)
+    data.lme <- lmer.quiet(get(colnames(mofa.factors)[j]) ~ Age + Sex + value + (1 | IID), data=data12)
     data.anova <- anova(data.lm)
-    data.anova.lme <- Anova(data.lme, test="F")
+    data.anova.lme <- Anova(data.lme$result, test="F")
     sleep.pval[i,j] <- data.anova$`Pr(>F)`[1]
     sleep.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    sleep.plme.war[i,j] <- paste(paste(data.lme$messages, collapse = "; "), paste(data.lme$warnings, collapse = "; "), sep = " - ")
     sleep.rsq[i,j] <- summary(data.lm)$r.squared
   }
 }
@@ -441,6 +486,7 @@ activity.pval <- matrix(NA,
                      dimnames = list(unique(activity.df$type), colnames(mofa.factors)))
 activity.rsq <- activity.pval
 activity.plme <- activity.pval
+activity.plme.war <- activity.pval
 
 for(i in 1:nrow(activity.pval)){
   for(j in 1:ncol(mofa.factors)){
@@ -452,15 +498,16 @@ for(i in 1:nrow(activity.pval)){
     data2 <- activity.df[activity.df$type==rownames(activity.pval)[i],]
     data12 <- merge(data1, data2, by="ID", sort=F)
     data.lm <- lm(get(colnames(mofa.factors)[j]) ~ value, data=data12)
-    data.lme <- lmer(get(colnames(mofa.factors)[j]) ~ Age + Sex + value + (1 | IID), data=data12)
+    lmer.quiet <- quietly(lmer)
+    data.lme <- lmer.quiet(get(colnames(mofa.factors)[j]) ~ Age + Sex + value + (1 | IID), data=data12)
     data.anova <- anova(data.lm)
-    data.anova.lme <- Anova(data.lme, test="F")
+    data.anova.lme <- Anova(data.lme$result, test="F")
     activity.pval[i,j] <- data.anova$`Pr(>F)`[1]
     activity.plme[i,j] <- data.anova.lme$`Pr(>F)`[3]
+    activity.plme.war[i,j] <- paste(paste(data.lme$messages, collapse = "; "), paste(data.lme$warnings, collapse = "; "), sep = " - ")
     activity.rsq[i,j] <- summary(data.lm)$r.squared
   }
 }
-
 ```
 
 
@@ -485,6 +532,16 @@ plme.m %>%
   rownames_to_column(var="question_ID") %>% 
   gather(key="factor", value = "p.lme", -question_ID) %>% 
   mutate(name=sel.conv$Name[match(question_ID, sel.conv$ID2)]) -> plme.df.l
+
+plme.war.m <- rbind(q.plme.war, clin.plme.war, hfii.plme.war, kk.plme.war, a.score.plme.war,
+                    s.score.plme.war, f.plme.war, sleep.plme.war, activity.plme.war)
+plme.war.m <- plme.war.m[rownames(pval.m),]
+plme.war.m %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="question_ID") %>% 
+  gather(key="factor", value = "p.lme.warning", -question_ID) %>% 
+  mutate(name=sel.conv$Name[match(question_ID, sel.conv$ID2)]) -> plme.war.df.l
+
 
 pval.m %>% 
   as.data.frame() %>% 
@@ -527,6 +584,7 @@ annot.row.df <- data.frame(row.names = rownames(toPlot),
 annot.row.df$type <- ifelse(grepl("^DHR", rownames(annot.row.df)), "Questionnaire", "Biometrics")
 annot.row.df$type[rownames(annot.row.df) %in% unique(hfii.l$component)] <- "Other"
 annot.row.df$type[rownames(annot.row.df) %in% unique(kk.l$component)] <- "Other"
+#annot.row.df$type[rownames(annot.row.df) %in% unique(group.l$component)] <- "Phenotypic subtype"
 annot.row.df$type[rownames(annot.row.df) %in% unique(s.score.l$component)] <- "Other"
 annot.row.df$type[rownames(annot.row.df) %in% "a.score"] <- "Other"
 annot.row.df$type[rownames(annot.row.df) %in% unique(f1to5.l$component)] <- "Fitness tests"
@@ -721,6 +779,7 @@ for(i in paste0("Factor", c(1,2,3,4,5,6,7,8,9,11,12,14))){
 }
 ```
 
+
 # Plots
 
 ## Boxplots for questionnaire data
@@ -887,26 +946,27 @@ for(f in sort(unique(fdr.df.l$factor))){
 
 # Linear Mixed Models
 
-Select the associations at FDR<0.001, then fit a linear mixed model to correct for age and sex as fixed effect and the individual as random effect.
+Select the associations at FDR<0.05, consider the LMM only for these associations and calculate an additional FDR
 
 ```{r}
 pval.df.l %>% 
-  left_join(fdr.df.l) %>% 
-  left_join(plme.df.l) %>% 
+  left_join(fdr.df.l) %>%
   left_join(rsq.df.l) %>% 
-  arrange(fdr) -> final.df
+  left_join(plme.df.l) %>%
+  left_join(plme.war.df.l) %>% 
+  arrange(p.val) %>% 
+  filter(fdr<0.05) %>% 
+  mutate(fdr.lme=p.adjust(p.lme, method = "fdr"),
+         p.lme.warning=str_replace_all(p.lme.warning,"\n", "")) -> final.df
 
 final.df %>% 
-  filter(fdr<0.001) %>%
   DT::datatable()
 ```
 
 
 
 ```{r}
-# save.image("/home/francesco.marabita/Projects/DHR/out/DHR_pheno_MOFA2_v03.RData")
-# write.table(final.df, file = "/home/francesco.marabita/Projects/DHR/out/pheno_MOFA2_assoc_v03.txt", sep="\t", quote = F, row.names = F)
-# write.table(rsq.df.l, file = "/home/francesco.marabita/Projects/DHR/out/pheno_MOFA2_assoc_rsq_v03.txt", sep="\t", quote = F, row.names = F)
-# write.table(fdr.df.l, file = "/home/francesco.marabita/Projects/DHR/out/pheno_MOFA2_assoc_fdr_v03.txt", sep="\t", quote = F, row.names = F)
+# save.image("/home/francesco.marabita/Projects/DHR/out/DHR_pheno_MOFA2_v04.RData")
+# write.table(final.df, file = "/home/francesco.marabita/Projects/DHR/out/pheno_MOFA2_assoc_v04.txt", sep="\t", quote = F, row.names = F)
 ```
 
